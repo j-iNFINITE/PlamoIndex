@@ -14,6 +14,9 @@ class ValidationError(Exception):
     """Raised when curated data validation fails."""
 
 
+_ALLOWED_MAPPING_STATUSES = {"confirmed", "matched", "candidate", "rejected", "unmapped"}
+
+
 def validate_vendor_yaml(path: Path) -> list[str]:
     """Validate a curated vendor YAML file.
 
@@ -132,6 +135,84 @@ def validate_overrides_yaml(path: Path, known_keys: set[str] | None = None) -> l
     return errors
 
 
+def validate_mappings_yaml(path: Path) -> list[str]:
+    """Validate curated product/manual mapping YAML file."""
+    errors: list[str] = []
+
+    if not path.is_file():
+        errors.append(f"File not found: {path}")
+        return errors
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        errors.append(f"YAML parse error in {path}: {e}")
+        return errors
+
+    if data is None:
+        return []
+    if not isinstance(data, dict):
+        errors.append(f"Expected a YAML mapping (dict), got {type(data).__name__}: {path}")
+        return errors
+
+    mappings = data.get("mappings", [])
+    if not isinstance(mappings, list):
+        errors.append(f"'mappings' must be a list in {path}")
+        return errors
+
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for i, mapping in enumerate(mappings):
+        if not isinstance(mapping, dict):
+            errors.append(f"Mapping {i} is not a mapping in {path}")
+            continue
+
+        product_key = mapping.get("product_key")
+        if not product_key:
+            errors.append(f"Mapping {i} missing 'product_key' in {path}")
+
+        link_keys = [
+            mapping.get("zh_schedule_key"),
+            mapping.get("ja_schedule_key"),
+            mapping.get("en_schedule_key"),
+            mapping.get("manual_source_key"),
+        ]
+        if not any(link_keys):
+            errors.append(
+                f"Mapping {i} must include at least one source/manual key in {path}"
+            )
+
+        status = mapping.get("status", "confirmed")
+        if status not in _ALLOWED_MAPPING_STATUSES:
+            errors.append(f"Mapping {i} has invalid status '{status}' in {path}")
+
+        if status == "confirmed" and not mapping.get("reason") and not mapping.get("method"):
+            errors.append(
+                f"Confirmed mapping {i} requires 'reason' or 'method' in {path}"
+            )
+
+        confidence = mapping.get("confidence")
+        if confidence is not None:
+            try:
+                confidence_float = float(confidence)
+            except (TypeError, ValueError):
+                errors.append(f"Mapping {i} confidence must be numeric in {path}")
+            else:
+                if not 0.0 <= confidence_float <= 1.0:
+                    errors.append(f"Mapping {i} confidence must be 0.0-1.0 in {path}")
+
+        identity = (
+            str(product_key) if product_key else "",
+            mapping.get("zh_schedule_key"),
+            mapping.get("manual_source_key"),
+        )
+        if identity in seen:
+            errors.append(f"Duplicate mapping {i} for {identity} in {path}")
+        seen.add(identity)
+
+    return errors
+
+
 def validate_curated_directory(curated_dir: Path) -> dict[str, list[str]]:
     """Validate all curated YAML files in a directory.
 
@@ -183,5 +264,12 @@ def validate_curated_directory(curated_dir: Path) -> dict[str, list[str]]:
                     results[str(aliases_path)] = ["'aliases' must be a mapping"]
         except yaml.YAMLError as e:
             results[str(aliases_path)] = [f"YAML parse error: {e}"]
+
+    # Validate mappings
+    mappings_path = curated_dir / "mappings.yaml"
+    if mappings_path.is_file():
+        errors = validate_mappings_yaml(mappings_path)
+        if errors:
+            results[str(mappings_path)] = errors
 
     return results

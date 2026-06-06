@@ -16,6 +16,7 @@ from plamoindex.curated.loader import (
 )
 from plamoindex.curated.validator import (
     validate_curated_directory,
+    validate_mappings_yaml,
     validate_overrides_yaml,
     validate_vendor_yaml,
 )
@@ -197,6 +198,40 @@ class TestCuratedValidator:
         assert len(mappings.mappings) == 1
         assert mappings.mappings[0].product_key == "bandai-product:01_7017"
         assert mappings.mappings[0].status == "confirmed"
+
+    def test_validate_mappings_missing_confirmed_reason(self, tmp_path: Path) -> None:
+        path = tmp_path / "mappings.yaml"
+        path.write_text(yaml.dump({
+            "mappings": [
+                {
+                    "product_key": "bandai-product:01_7017",
+                    "zh_schedule_key": "bandai-schedule:zh-Hans:3236",
+                    "status": "confirmed",
+                }
+            ],
+        }))
+
+        errors = validate_mappings_yaml(path)
+
+        assert any("requires 'reason' or 'method'" in error for error in errors)
+
+    def test_validate_directory_includes_mappings(self, tmp_path: Path) -> None:
+        curated_dir = tmp_path / "curated"
+        curated_dir.mkdir()
+        (curated_dir / "mappings.yaml").write_text(yaml.dump({
+            "mappings": [
+                {
+                    "product_key": "bandai-product:01_7017",
+                    "zh_schedule_key": "bandai-schedule:zh-Hans:3236",
+                    "status": "invalid",
+                    "reason": "bad status",
+                }
+            ],
+        }))
+
+        results = validate_curated_directory(curated_dir)
+
+        assert str(curated_dir / "mappings.yaml") in results
 
     def test_load_all_mappings_empty(self, tmp_path: Path) -> None:
         curated_dir = tmp_path / "curated"

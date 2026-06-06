@@ -20,7 +20,7 @@ from plamoindex.models.relationship import RelationshipRecord
 from plamoindex.models.shared import PriceInfo, Provenance, ReleaseInfo, TaxonomyRef
 from plamoindex.sources.bandai_manual import BandaiManualCollector
 from plamoindex.sources.bandai_schedule import BandaiScheduleCollector
-from plamoindex.sources.base import SourcePlugin
+from plamoindex.sources.base import SourceCollection, SourcePlugin
 
 
 class BandaiSource(SourcePlugin):
@@ -34,11 +34,13 @@ class BandaiSource(SourcePlugin):
     def __init__(self) -> None:
         self._config: PlamoIndexConfig | None = None
         self._raw_dir: Path | None = None
+        self._collection: SourceCollection | None = None
 
     def configure(self, config: PlamoIndexConfig, raw_dir: Path | None = None) -> None:
         """Configure the source plugin with runtime settings."""
         self._config = config
         self._raw_dir = raw_dir
+        self._collection = None
 
     @property
     def source_id(self) -> str:
@@ -50,6 +52,58 @@ class BandaiSource(SourcePlugin):
 
     def collect_manuals(self) -> list[ManualRecord]:
         """Collect Bandai manual records."""
+        return self.collect_all_records().manuals
+
+    def collect_product_sources(self) -> list[ProductSourceRecord]:
+        """Collect Bandai schedule/product source records."""
+        return self.collect_all_records().product_sources
+
+    def collect_products(self) -> list[ProductRecord]:
+        """Product merging is handled by merge.py, not here."""
+        return []
+
+    def collect_relationships(self) -> list[RelationshipRecord]:
+        """Bandai relationship inference is handled by merge.py."""
+        return self.collect_all_records().relationships
+
+    def collect_all_records(self) -> SourceCollection:
+        """Collect Bandai manual and schedule records in one pass."""
+        if self._collection is not None:
+            return self._collection
+
+        manuals = self._collect_manual_records()
+        product_sources = self._collect_product_source_records()
+        self._collection = SourceCollection(
+            manuals=manuals,
+            product_sources=product_sources,
+            relationships=[],
+        )
+        return self._collection
+
+    def load_cached_records(self, raw_dir: Path) -> SourceCollection:
+        """Load Bandai records from the raw collection cache."""
+        manual_cache = CollectorCache(raw_dir, "bandai_manual")
+        schedule_cache = CollectorCache(raw_dir, "bandai_schedule")
+        try:
+            manuals = [
+                _manual_dict_to_record(m)
+                for m in manual_cache.load_records("manuals.json")
+            ]
+            product_sources = [
+                _product_source_dict_to_record(ps)
+                for ps in schedule_cache.load_records("product_sources.json")
+            ]
+            return SourceCollection(
+                manuals=manuals,
+                product_sources=product_sources,
+                relationships=[],
+            )
+        finally:
+            manual_cache.close()
+            schedule_cache.close()
+
+    def _collect_manual_records(self) -> list[ManualRecord]:
+        """Collect Bandai manual records from live source pages."""
         config = self._config or PlamoIndexConfig()
         raw_dir = self._raw_dir or Path(config.raw.path)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -64,8 +118,8 @@ class BandaiSource(SourcePlugin):
         finally:
             collector.close()
 
-    def collect_product_sources(self) -> list[ProductSourceRecord]:
-        """Collect Bandai schedule/product source records."""
+    def _collect_product_source_records(self) -> list[ProductSourceRecord]:
+        """Collect Bandai product source records from live schedule pages."""
         config = self._config or PlamoIndexConfig()
         raw_dir = self._raw_dir or Path(config.raw.path)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -79,14 +133,6 @@ class BandaiSource(SourcePlugin):
             return [_product_source_dict_to_record(ps) for ps in result.product_sources]
         finally:
             collector.close()
-
-    def collect_products(self) -> list[ProductRecord]:
-        """Product merging is handled by merge.py, not here."""
-        return []
-
-    def collect_relationships(self) -> list[RelationshipRecord]:
-        """Bandai relationship inference is handled by merge.py."""
-        return []
 
 
 def _manual_dict_to_record(d: dict[str, Any]) -> ManualRecord:
@@ -246,5 +292,4 @@ def _normalize_title(title: str) -> str | None:
     if not title:
         return None
     return "".join(title.split()).lower()
-
 

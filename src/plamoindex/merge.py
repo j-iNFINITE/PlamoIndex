@@ -10,13 +10,15 @@ Handles:
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from plamoindex.curated.loader import CuratedMappingEntry, CuratedOverrideEntry
 from plamoindex.models.manual import ManualRecord
 from plamoindex.models.product import ProductRecord, ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
-from plamoindex.models.shared import PriceInfo, Provenance, ReleaseInfo
+from plamoindex.models.shared import ManualRelationRef, PriceInfo, ProductRelationRef, Provenance, ReleaseInfo
 
 
 class DuplicateKeyError(ValueError):
@@ -163,40 +165,6 @@ def merge_product_sources(
             source_groups[group_key] = []
         source_groups[group_key].append(ps)
 
-    # Handle Chinese sources separately
-    zh_sources: list[ProductSourceRecord] = [ps for ps in product_sources if ps.locale == "zh-Hans"]
-    for zh_source in zh_sources:
-        if zh_source.product_source_key in curated_zh_to_product:
-            # Curated mapping promotes this Chinese source
-            product_key = curated_zh_to_product[zh_source.product_source_key]
-            _merge_into_bandai_product(products, product_key, zh_source)
-        else:
-            # Chinese sources remain standalone candidate products
-            manufacturer_slug = _get_product_prefix(zh_source.manufacturer)
-            product_key = f"{manufacturer_slug}:{zh_source.product_source_id}"
-            product = ProductRecord(
-                product_key=product_key,
-                manufacturer=zh_source.manufacturer,
-                source_type="automated",
-                titles={zh_source.locale: zh_source.title},
-                normalized_titles=(
-                    {zh_source.locale: zh_source.normalized_title}
-                    if zh_source.normalized_title
-                    else None
-                ),
-                source_ids={zh_source.source: zh_source.product_source_id},
-                product_urls={zh_source.locale: zh_source.product_url} if zh_source.product_url else None,
-                releases=[zh_source.release] if zh_source.release else None,
-                prices=zh_source.prices,
-                provenance=Provenance(
-                    collector="product_merge",
-                    collection_method="merge",
-                    collected_at=zh_source.provenance.collected_at,
-                ),
-                related_product_sources=[zh_source.product_source_key],
-            )
-            products.append(product)
-
     # Merge grouped (non-Chinese) sources
     for group_key, sources in source_groups.items():
         manufacturer = sources[0].manufacturer
@@ -281,6 +249,44 @@ def merge_product_sources(
             )
             products.append(product)
 
+    # Handle Chinese sources after ja/en products exist, so curated mappings can
+    # merge into the already-created Bandai product instead of creating a
+    # duplicate product_key.
+    zh_sources: list[ProductSourceRecord] = [ps for ps in product_sources if ps.locale == "zh-Hans"]
+    for zh_source in zh_sources:
+        if zh_source.product_source_key in curated_zh_to_product:
+            product_key = curated_zh_to_product[zh_source.product_source_key]
+            _merge_into_bandai_product(products, product_key, zh_source)
+        else:
+            manufacturer_slug = _get_product_prefix(zh_source.manufacturer)
+            product_key = f"{manufacturer_slug}:{zh_source.product_source_id}"
+            product = ProductRecord(
+                product_key=product_key,
+                manufacturer=zh_source.manufacturer,
+                source_type="automated",
+                titles={zh_source.locale: zh_source.title},
+                normalized_titles=(
+                    {zh_source.locale: zh_source.normalized_title}
+                    if zh_source.normalized_title
+                    else None
+                ),
+                source_ids={zh_source.source: zh_source.product_source_id},
+                product_urls={zh_source.locale: zh_source.product_url} if zh_source.product_url else None,
+                releases=[zh_source.release] if zh_source.release else None,
+                prices=zh_source.prices,
+                provenance=Provenance(
+                    collector="product_merge",
+                    collection_method="merge",
+                    collected_at=zh_source.provenance.collected_at,
+                ),
+                related_product_sources=[zh_source.product_source_key],
+            )
+            products.append(product)
+
+    for mapping in curated_confirmations.values():
+        if mapping.manual_source_key and mapping.product_key:
+            relationships.append(_relationship_from_curated_mapping(mapping))
+
     return products, relationships
 
 
@@ -348,6 +354,175 @@ def _merge_into_bandai_product(
         ),
     )
     products.append(product)
+
+
+def _relationship_from_curated_mapping(mapping: CuratedMappingEntry) -> RelationshipRecord:
+    """Build a manual-product relationship from a curated mapping."""
+    if not mapping.manual_source_key:
+        raise ValueError("Curated mapping relationship requires manual_source_key")
+
+    method = mapping.method or "curated_mapping"
+    status = mapping.status
+    matched_fields = ["curated.mapping"] if status == "matched" else None
+
+    return RelationshipRecord(
+        relationship_key=f"rel:manual-product:{mapping.manual_source_key}:{mapping.product_key}",
+        from_key=mapping.manual_source_key,
+        to_key=mapping.product_key,
+        relationship="manual_for_product",
+        status=status,
+        method=method,
+        confidence=mapping.confidence,
+        matched_fields=matched_fields,
+        reason=mapping.reason,
+        provenance=Provenance(
+            collector="curated_mapping",
+            collection_method="manual",
+            collected_at=datetime.now(timezone.utc),
+        ),
+    )
+
+
+def infer_manual_product_relationships(
+    manuals: list[ManualRecord],
+    products: list[ProductRecord],
+    curated_mappings: list[CuratedMappingEntry] | None = None,
+    existing_relationships: list[RelationshipRecord] | None = None,
+) -> list[RelationshipRecord]:
+    """Infer high-confidence manual-product relationships after product merge."""
+    relationships: list[RelationshipRecord] = []
+    existing_keys = {
+        rel.relationship_key for rel in (existing_relationships or [])
+    }
+    products_by_key = {product.product_key: product for product in products}
+    manuals_by_key = {manual.manual_source_key: manual for manual in manuals}
+
+    for manual in manuals:
+        if manual.source != "bandai":
+            continue
+
+        manual_ja = _localized_title(manual, "ja") or manual.title
+        manual_en = _localized_title(manual, "en") or manual.title_en
+        norm_manual_ja = _normalize_match_title(manual_ja)
+        norm_manual_en = _normalize_match_title(manual_en)
+        if not norm_manual_ja or not norm_manual_en:
+            continue
+
+        for product in products:
+            if product.manufacturer != "BANDAI SPIRITS":
+                continue
+
+            product_ja = product.titles.get("ja")
+            product_en = product.titles.get("en")
+            if (
+                norm_manual_ja == _normalize_match_title(product_ja)
+                and norm_manual_en == _normalize_match_title(product_en)
+            ):
+                rel = _make_manual_product_relationship(
+                    manual=manual,
+                    product=product,
+                    status="matched",
+                    method="official_bilingual_title_match",
+                    confidence=0.97,
+                    matched_fields=[
+                        "manual.localized_titles.ja",
+                        "manual.title_en",
+                        "product.titles.ja",
+                        "product.titles.en",
+                    ],
+                )
+                if rel.relationship_key not in existing_keys:
+                    relationships.append(rel)
+                    existing_keys.add(rel.relationship_key)
+                _attach_embedded_relationship(manual, product, rel)
+
+    for mapping in curated_mappings or []:
+        if not mapping.manual_source_key:
+            continue
+        mapped_product = products_by_key.get(mapping.product_key)
+        mapped_manual = manuals_by_key.get(mapping.manual_source_key)
+        if mapped_product is None or mapped_manual is None:
+            continue
+        rel = _relationship_from_curated_mapping(mapping)
+        if rel.relationship_key not in existing_keys:
+            relationships.append(rel)
+            existing_keys.add(rel.relationship_key)
+        _attach_embedded_relationship(mapped_manual, mapped_product, rel)
+
+    return relationships
+
+
+def _localized_title(manual: ManualRecord, locale: str) -> str | None:
+    """Return a localized manual title if available."""
+    if manual.localized_titles:
+        return manual.localized_titles.get(locale)
+    return None
+
+
+def _normalize_match_title(title: str | None) -> str:
+    """Normalize titles for conservative exact matching."""
+    if not title:
+        return ""
+    return re.sub(r"[\W_]+", "", title, flags=re.UNICODE).casefold()
+
+
+def _make_manual_product_relationship(
+    manual: ManualRecord,
+    product: ProductRecord,
+    status: str,
+    method: str,
+    confidence: float,
+    matched_fields: list[str] | None = None,
+) -> RelationshipRecord:
+    """Build a manual-product RelationshipRecord."""
+    return RelationshipRecord(
+        relationship_key=f"rel:manual-product:{manual.manual_source_key}:{product.product_key}",
+        from_key=manual.manual_source_key,
+        to_key=product.product_key,
+        relationship="manual_for_product",
+        status=status,
+        method=method,
+        confidence=confidence,
+        matched_fields=matched_fields,
+        provenance=Provenance(
+            collector="relationship_inference",
+            collection_method="inference",
+            collected_at=datetime.now(timezone.utc),
+        ),
+    )
+
+
+def _attach_embedded_relationship(
+    manual: ManualRecord,
+    product: ProductRecord,
+    relationship: RelationshipRecord,
+) -> None:
+    """Mirror a standalone relationship into manual/product embedded refs."""
+    manual_refs = manual.related_products or []
+    if not any(ref.product_key == product.product_key for ref in manual_refs):
+        manual_refs.append(
+            ProductRelationRef(
+                product_key=product.product_key,
+                relationship=relationship.relationship,
+                status=relationship.status,
+                method=relationship.method,
+                confidence=relationship.confidence,
+            )
+        )
+        manual.related_products = manual_refs
+
+    product_refs = product.related_manuals or []
+    if not any(ref.manual_source_key == manual.manual_source_key for ref in product_refs):
+        product_refs.append(
+            ManualRelationRef(
+                manual_source_key=manual.manual_source_key,
+                relationship=relationship.relationship,
+                status=relationship.status,
+                method=relationship.method,
+                confidence=relationship.confidence,
+            )
+        )
+        product.related_manuals = product_refs
 
 
 def validate_final_dataset(

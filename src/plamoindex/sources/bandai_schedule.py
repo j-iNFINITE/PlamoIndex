@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
@@ -37,6 +39,48 @@ _ZH_PRODUCT_URL = "https://bandaihobbysite.cn/index/index/detail/id/{cn_id}"
 # Default month window for collection
 _DEFAULT_PAST_MONTHS = 3
 _DEFAULT_FUTURE_MONTHS = 6
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+_BROWSER_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+    "image/avif,image/webp,image/apng,*/*;q=0.8"
+)
+_JA_HEADERS = {
+    "User-Agent": _BROWSER_USER_AGENT,
+    "Accept": _BROWSER_ACCEPT,
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Referer": "https://bandai-hobby.net/",
+}
+_EN_HEADERS = {
+    "User-Agent": _BROWSER_USER_AGENT,
+    "Accept": _BROWSER_ACCEPT,
+    "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+    "Referer": "https://global.bandai-hobby.net/en-others/",
+}
+_ZH_HEADERS = {
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+def _get_attr_str(tag: Tag, name: str) -> str:
+    """Return a tag attribute only when it is a string."""
+    value = tag.get(name)
+    return value if isinstance(value, str) else ""
+
+
+def _clean_text(text: str) -> str:
+    """Collapse source HTML whitespace into readable text."""
+    return " ".join(text.split())
+
+
+def _find_text_tag(soup: BeautifulSoup, tags: list[str], pattern: re.Pattern[str]) -> Tag | None:
+    """Find the first tag whose text matches a pattern."""
+    for tag in soup.find_all(name=tags):
+        if pattern.search(tag.get_text(strip=True)):
+            return tag
+    return None
 
 
 class BandaiScheduleCollector(BaseCollector):
@@ -69,20 +113,18 @@ class BandaiScheduleCollector(BaseCollector):
 
         result = result + ja + en + zh
 
-        # Save to cache
-        if result.product_sources:
-            self.cache.save_records(result.product_sources, "product_sources.json")
-        if result.manuals:
-            self.cache.save_records(result.manuals, "manuals.json")
-        if result.relationships:
-            self.cache.save_records(result.relationships, "relationships.json")
+        # Save the current normalized result, including empty lists, so build
+        # never reads stale records from a previous run.
+        self.cache.save_records(result.product_sources, "product_sources.json")
+        self.cache.save_records(result.manuals, "manuals.json")
+        self.cache.save_records(result.relationships, "relationships.json")
 
         return result
 
     def _collect_locale(
         self,
         locale: str,
-        collect_fn: Any,
+        collect_fn: Callable[[], CollectionResult],
     ) -> CollectionResult:
         """Collect for a single locale with error handling."""
         try:
@@ -167,10 +209,7 @@ class BandaiScheduleCollector(BaseCollector):
         result = self.fetch_with_cache(
             url,
             page_id,
-            headers={
-                "Accept-Language": "ja,en;q=0.9",
-                "Referer": "https://bandai-hobby.net/",
-            },
+            headers=_JA_HEADERS,
             force=True,  # Always fetch schedule pages
         )
 
@@ -189,6 +228,7 @@ class BandaiScheduleCollector(BaseCollector):
         result = self.fetch_with_cache(
             url,
             page_id,
+            headers=_EN_HEADERS,
             force=True,
         )
 
@@ -207,9 +247,7 @@ class BandaiScheduleCollector(BaseCollector):
         result = self.fetch_with_cache(
             url,
             page_id,
-            headers={
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            },
+            headers=_ZH_HEADERS,
             force=True,
         )
 
@@ -237,7 +275,8 @@ class BandaiScheduleCollector(BaseCollector):
         page_id = f"product-detail-{locale}-{product_id}"
 
         try:
-            result = self.fetch.fetch(url)
+            headers = _JA_HEADERS if locale == "ja" else _EN_HEADERS
+            result = self.fetch.fetch(url, headers=headers)
             self.cache.put_page(page_id, result.content_hash)
             return _parse_product_detail(result.text, url, locale, product_id)
         except Exception as exc:
@@ -258,7 +297,7 @@ class BandaiScheduleCollector(BaseCollector):
         page_id = f"zh-product-detail-{cn_id}"
 
         try:
-            result = self.fetch.fetch(url)
+            result = self.fetch.fetch(url, headers=_ZH_HEADERS)
             self.cache.put_page(page_id, result.content_hash)
             return _parse_zh_product_detail(result.text, url, cn_id)
         except Exception as exc:
@@ -307,7 +346,9 @@ def _parse_ja_schedule_page(html: str, year_month: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "lxml")
     entries: list[dict[str, Any]] = []
 
-    items = soup.select(".card, .schedule-card, [class*='card'], .product-item")
+    items = soup.select("a.c-card.p-card[href*='/item/']")
+    if not items:
+        items = soup.select(".card, .schedule-card, [class*='card'], .product-item")
     for item in items:
         entry = _parse_ja_card(item, year_month)
         if entry:
@@ -318,31 +359,53 @@ def _parse_ja_schedule_page(html: str, year_month: str) -> list[dict[str, Any]]:
 
 def _parse_ja_card(item: Tag, year_month: str) -> dict[str, Any] | None:
     """Parse a single Japanese schedule card."""
-    link = item.find("a", href=re.compile(r"/item/\d"))
+    link: Tag | None
+    if item.name == "a" and re.search(r"/item/", _get_attr_str(item, "href")):
+        link = item
+    else:
+        link = item.find(name="a", href=re.compile(r"/item/"))
     if not link:
-        link = item.find("a", href=re.compile(r"item"))
+        link = item.find(name="a", href=re.compile(r"item"))
     if not link:
         return None
 
-    href = link.get("href", "")
-    pid_match = re.search(r"/item/([\w_]+)", href)
+    href = _get_attr_str(link, "href")
+    pid_match = re.search(r"/item/([^/?#]+)/?", href)
     if not pid_match:
         return None
     product_id = pid_match.group(1)
 
-    title_ja = link.get_text(strip=True) or ""
+    title_elem = item.select_one(".p-card__tit")
+    img = item.find("img")
+    title_ja = (
+        _clean_text(title_elem.get_text(" ", strip=True))
+        if title_elem
+        else _clean_text(_get_attr_str(img, "alt") if img else link.get_text(" ", strip=True))
+    )
 
     # Price parsing
     price_text = None
-    price_elem = item.find(["span", "p", "div"], class_=re.compile(r"price|value", re.I))
+    price_elem = item.select_one(".p-card__price")
+    if not price_elem:
+        price_elem = item.find(["span", "p", "div"], class_=re.compile(r"price|value", re.I))
     if price_elem:
-        price_text = price_elem.get_text(strip=True)
+        price_text = _clean_text(price_elem.get_text(" ", strip=True))
 
     # Image
-    img = item.find("img")
-    image_url = img.get("src") if img and img.get("src") else None
-    if image_url and isinstance(image_url, str) and image_url.startswith("/"):
-        image_url = f"https://bandai-hobby.net{image_url}"
+    image_url = _get_attr_str(img, "src") if img else None
+    if image_url:
+        image_url = urljoin("https://bandai-hobby.net/", image_url)
+
+    release_elem = item.select_one(".p-card_date")
+    release_text = (
+        _clean_text(release_elem.get_text(" ", strip=True))
+        if release_elem
+        else item.get_text(" ", strip=True)
+    )
+    release_month = _parse_release_detail(release_text) or {
+        "release_month": year_month[:4] + "-" + year_month[4:],
+        "release_date_precision": "month",
+    }
 
     amount, tax_included = _parse_jp_price(price_text) if price_text else (None, True)
 
@@ -354,8 +417,9 @@ def _parse_ja_card(item: Tag, year_month: str) -> dict[str, Any] | None:
         "title": title_ja,
         "image_url": image_url,
         "product_url": _JA_PRODUCT_URL.format(product_id=product_id),
-        "release_month": year_month[:4] + "-" + year_month[4:],
-        "release_date_precision": "month",
+        "release_month": release_month.get("release_month"),
+        "release_date_precision": release_month.get("release_date_precision"),
+        "release_raw": release_text,
         "price_amount": amount,
         "price_currency": "JPY",
         "price_tax_included": tax_included,
@@ -395,7 +459,9 @@ def _parse_en_schedule_page(html: str, year_month: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "lxml")
     entries: list[dict[str, Any]] = []
 
-    items = soup.select(".card, .schedule-card, [class*='card'], .product-item")
+    items = soup.select("a.c-card.p-card[href*='/item/']")
+    if not items:
+        items = soup.select(".card, .schedule-card, [class*='card'], .product-item")
     for item in items:
         entry = _parse_en_card(item, year_month)
         if entry:
@@ -406,34 +472,46 @@ def _parse_en_schedule_page(html: str, year_month: str) -> list[dict[str, Any]]:
 
 def _parse_en_card(item: Tag, year_month: str) -> dict[str, Any] | None:
     """Parse a single English schedule card."""
-    link = item.find("a", href=re.compile(r"/item/\d"))
+    link: Tag | None
+    if item.name == "a" and re.search(r"/item/", _get_attr_str(item, "href")):
+        link = item
+    else:
+        link = item.find(name="a", href=re.compile(r"/item/"))
     if not link:
-        link = item.find("a", href=re.compile(r"item"))
+        link = item.find(name="a", href=re.compile(r"item"))
     if not link:
         return None
 
-    href = link.get("href", "")
-    pid_match = re.search(r"/item/([\w_]+)", href)
+    href = _get_attr_str(link, "href")
+    pid_match = re.search(r"/item/([^/?#]+)/?", href)
     if not pid_match:
         return None
     product_id = pid_match.group(1)
 
-    title_en = link.get_text(strip=True) or ""
+    title_elem = item.select_one(".p-card__tit")
+    img = item.find("img")
+    title_en = (
+        _clean_text(title_elem.get_text(" ", strip=True))
+        if title_elem
+        else _clean_text(_get_attr_str(img, "alt") if img else link.get_text(" ", strip=True))
+    )
 
     # Price
     price_text = None
-    price_elem = item.find(["span", "p", "div"], class_=re.compile(r"price|value", re.I))
+    price_elem = item.select_one(".p-card__price")
+    if not price_elem:
+        price_elem = item.find(["span", "p", "div"], class_=re.compile(r"price|value", re.I))
     if price_elem:
-        price_text = price_elem.get_text(strip=True)
+        price_text = _clean_text(price_elem.get_text(" ", strip=True))
 
     # Image
-    img = item.find("img")
-    image_url = img.get("src") if img and img.get("src") else None
-    if image_url and isinstance(image_url, str) and image_url.startswith("/"):
-        image_url = f"https://global.bandai-hobby.net{image_url}"
+    image_url = _get_attr_str(img, "src") if img else None
+    if image_url:
+        image_url = urljoin("https://global.bandai-hobby.net/en-others/", image_url)
 
     # Parse release month from card (may differ from request month)
-    release_raw = item.get_text()
+    release_elem = item.select_one(".p-card_date")
+    release_raw = _clean_text(release_elem.get_text(" ", strip=True)) if release_elem else item.get_text()
     release_month_parsed = _parse_en_release_month(release_raw) or (
         year_month[:4] + "-" + year_month[4:]
     )
@@ -493,7 +571,9 @@ def _parse_zh_schedule_page(html: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "lxml")
     entries: list[dict[str, Any]] = []
 
-    items = soup.select(".card, [class*='card'], .product-item, li")
+    items = soup.select("a.c-card.p-card[href*='/index/index/detail/id/']")
+    if not items:
+        items = soup.select(".card, [class*='card'], .product-item, li")
     for item in items:
         entry = _parse_zh_card(item)
         if entry:
@@ -504,13 +584,17 @@ def _parse_zh_schedule_page(html: str) -> list[dict[str, Any]]:
 
 def _parse_zh_card(item: Tag) -> dict[str, Any] | None:
     """Parse a single Chinese schedule card."""
-    link = item.find("a", href=re.compile(r"/index/index/detail/id/\d+"))
+    link: Tag | None
+    if item.name == "a" and re.search(r"/index/index/detail/id/\d+", _get_attr_str(item, "href")):
+        link = item
+    else:
+        link = item.find(name="a", href=re.compile(r"/index/index/detail/id/\d+"))
     if not link:
-        link = item.find("a", href=re.compile(r"detail"))
+        link = item.find(name="a", href=re.compile(r"detail"))
     if not link:
         return None
 
-    href = link.get("href", "")
+    href = _get_attr_str(link, "href")
     cn_id_match = re.search(r"/id/(\d+)", href)
     if not cn_id_match:
         cn_id_match = re.search(r"id=(\d+)", href)
@@ -518,19 +602,26 @@ def _parse_zh_card(item: Tag) -> dict[str, Any] | None:
         return None
     cn_id = cn_id_match.group(1)
 
-    title_zh = link.get_text(strip=True) or link.get("title", "")
+    title_elem = item.select_one(".p-card__tit")
+    img = item.find("img")
+    title_zh = (
+        _clean_text(title_elem.get_text(" ", strip=True))
+        if title_elem
+        else _clean_text(_get_attr_str(img, "alt") if img else link.get_text(" ", strip=True))
+    )
 
     # Image
-    img = item.find("img")
-    image_url = img.get("src") if img and img.get("src") else None
-    if image_url and isinstance(image_url, str) and image_url.startswith("/"):
-        image_url = f"https://bandaihobbysite.cn{image_url}"
+    image_url = _get_attr_str(img, "src") if img else None
+    if image_url:
+        image_url = urljoin("https://bandaihobbysite.cn/", image_url)
 
     # Price parsing (Chinese prices are tax-included)
     price_text = None
-    price_elem = item.find(["span", "p", "div"], class_=re.compile(r"price|value", re.I))
+    price_elem = item.select_one(".p-card__price")
+    if not price_elem:
+        price_elem = item.find(["span", "p", "div"], class_=re.compile(r"price|value", re.I))
     if price_elem:
-        price_text = price_elem.get_text(strip=True)
+        price_text = _clean_text(price_elem.get_text(" ", strip=True))
 
     amount = None
     if price_text:
@@ -540,7 +631,8 @@ def _parse_zh_card(item: Tag) -> dict[str, Any] | None:
             amount = float(amt_match.group(1))
 
     # Release month parsing
-    release_raw = item.get_text()
+    release_elem = item.select_one(".p-card_date")
+    release_raw = _clean_text(release_elem.get_text(" ", strip=True)) if release_elem else item.get_text()
     release_month = _parse_zh_release_month(release_raw)
 
     entry: dict[str, Any] = {
@@ -586,21 +678,20 @@ def _parse_product_detail(html: str, url: str, locale: str, product_id: str) -> 
     soup = BeautifulSoup(html, "lxml")
     detail: dict[str, Any] = {}
 
-    # Taxonomy from flat cards (priority 1)
-    taxonomy = _parse_taxonomy_from_cards(soup)
-    if taxonomy:
-        detail["taxonomy"] = taxonomy
-
-    # Taxonomy from breadcrumb (priority 2)
-    if not taxonomy:
-        breadcrumb_tax = _parse_taxonomy_from_breadcrumb(soup)
-        if breadcrumb_tax:
-            detail["taxonomy"] = breadcrumb_tax
+    # Combine breadcrumb category context with explicit flat cards for brand/series.
+    taxonomy_entries: list[dict[str, Any]] = []
+    breadcrumb_tax = _parse_taxonomy_from_breadcrumb(soup)
+    if breadcrumb_tax:
+        taxonomy_entries.extend(breadcrumb_tax)
+    card_tax = _parse_taxonomy_from_cards(soup)
+    if card_tax:
+        taxonomy_entries.extend(card_tax)
+    if taxonomy_entries:
+        detail["taxonomy"] = _dedupe_taxonomy_entries(taxonomy_entries)
 
     # Price from detail page
-    price_elem = soup.find(["span", "p", "div"], string=re.compile(r"[0-9,]+円|Yen|¥", re.I))
-    if price_elem:
-        price_text = price_elem.get_text(strip=True)
+    price_text = _find_product_detail_value(soup, ["価格", "Price"])
+    if price_text:
         clean = price_text.replace(",", "").replace(" ", "")
         amt_match = re.search(r"(\d+\.?\d*)", clean)
         if amt_match:
@@ -609,17 +700,29 @@ def _parse_product_detail(html: str, url: str, locale: str, product_id: str) -> 
             detail["price_tax_included"] = "込" in price_text or "tax" not in price_text.lower()
 
     # Release month from detail
-    release_elem = soup.find(["span", "p", "div"], string=re.compile(r"発売|release", re.I))
-    if release_elem:
-        parent = release_elem.parent
-        if parent:
-            release_text = parent.get_text(strip=True)
-            detail["release_raw"] = release_text
-            parsed = _parse_release_detail(release_text)
-            if parsed:
-                detail.update(parsed)
+    release_text = _find_product_detail_value(soup, ["発売日", "Release Date", "Release"])
+    if release_text:
+        detail["release_raw"] = release_text
+        parsed = _parse_release_detail(release_text)
+        if parsed:
+            detail.update(parsed)
 
     return detail
+
+
+def _find_product_detail_value(soup: BeautifulSoup, labels: list[str]) -> str | None:
+    """Find Bandai product detail values from dt/dd product metadata rows."""
+    label_patterns = [re.compile(re.escape(label), re.I) for label in labels]
+    for label_elem in soup.select(".pg-products__detail dt, .product-detail dt, .product-info dt"):
+        label_text = _clean_text(label_elem.get_text(" ", strip=True))
+        if not any(pattern.search(label_text) for pattern in label_patterns):
+            continue
+        value = label_elem.find_next_sibling("dd")
+        if value:
+            value_text = _clean_text(value.get_text(" ", strip=True))
+            if value_text:
+                return value_text
+    return None
 
 
 def _parse_taxonomy_from_cards(soup: BeautifulSoup) -> list[dict[str, Any]] | None:
@@ -630,11 +733,11 @@ def _parse_taxonomy_from_cards(soup: BeautifulSoup) -> list[dict[str, Any]] | No
 
     taxonomy_entries = []
     for card in cards:
-        link = card.find("a")
+        link = card if card.name == "a" else card.find("a")
         if not link:
             continue
 
-        href = link.get("href", "")
+        href = _get_attr_str(link, "href")
         label = link.get_text(strip=True) or card.get_text(strip=True)
 
         entry = {"label": label, "url": href}
@@ -652,6 +755,11 @@ def _parse_taxonomy_from_cards(soup: BeautifulSoup) -> list[dict[str, Any]] | No
                 entry["slug"] = slug_match.group(1)
         elif "/category/" in href or "cate" in href:
             entry["kind"] = "category"
+        elif re.search(r"https?://(?:www\.)?bandai-hobby\.net/[\w-]+/?$", href):
+            entry["kind"] = "category"
+            slug_match = re.search(r"bandai-hobby\.net/([\w-]+)/?$", href)
+            if slug_match:
+                entry["slug"] = slug_match.group(1)
 
         taxonomy_entries.append(entry)
 
@@ -667,7 +775,7 @@ def _parse_taxonomy_from_breadcrumb(soup: BeautifulSoup) -> list[dict[str, Any]]
     items = breadcrumb.find_all("a")
     taxonomy_entries = []
     for item in items:
-        href = item.get("href", "")
+        href = _get_attr_str(item, "href")
         label = item.get_text(strip=True)
         if not label or label in ("TOP", "Home", "ホーム"):
             continue
@@ -675,14 +783,41 @@ def _parse_taxonomy_from_breadcrumb(soup: BeautifulSoup) -> list[dict[str, Any]]
         entry: dict[str, Any] = {"label": label, "url": href}
         if "/brand/" in href:
             entry["kind"] = "brand"
+            slug_match = re.search(r"/brand/([\w-]+)", href)
+            if slug_match:
+                entry["slug"] = slug_match.group(1)
         elif "/series/" in href:
             entry["kind"] = "series"
+            slug_match = re.search(r"/series/([\w-]+)", href)
+            if slug_match:
+                entry["slug"] = slug_match.group(1)
         elif "/category/" in href or "cate" in href:
             entry["kind"] = "category"
+            slug_match = re.search(r"/category/([\w-]+)", href)
+            if slug_match:
+                entry["slug"] = slug_match.group(1)
+        elif re.search(r"https?://(?:www\.)?bandai-hobby\.net/[\w-]+/?$", href):
+            entry["kind"] = "category"
+            slug_match = re.search(r"bandai-hobby\.net/([\w-]+)/?$", href)
+            if slug_match:
+                entry["slug"] = slug_match.group(1)
 
         taxonomy_entries.append(entry)
 
-    return taxonomy_entries if taxonomy_entries else None
+    return _dedupe_taxonomy_entries(taxonomy_entries) if taxonomy_entries else None
+
+
+def _dedupe_taxonomy_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate taxonomy entries while preserving source order."""
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str, str | None]] = set()
+    for entry in entries:
+        key = (entry.get("kind"), entry.get("label", ""), entry.get("url"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
 
 
 def _parse_release_detail(text: str) -> dict[str, str | None] | None:
@@ -735,9 +870,9 @@ def _parse_zh_product_detail(html: str, url: str, cn_id: str) -> dict[str, Any]:
     # Taxonomy from links
     taxonomy_entries: list[dict[str, Any]] = []
 
-    brand_link = soup.find("a", href=re.compile(r"/index/index/brand/cate/\d+"))
+    brand_link = soup.find(name="a", href=re.compile(r"/index/index/brand/cate/\d+"))
     if brand_link:
-        href = brand_link.get("href", "")
+        href = _get_attr_str(brand_link, "href")
         label = brand_link.get_text(strip=True)
         cate_match = re.search(r"/cate/(\d+)", href)
         taxonomy_entries.append({
@@ -747,9 +882,9 @@ def _parse_zh_product_detail(html: str, url: str, cn_id: str) -> dict[str, Any]:
             "url": href if href.startswith("http") else f"https://bandaihobbysite.cn{href}",
         })
 
-    series_link = soup.find("a", href=re.compile(r"/index/index/series/cate/\d+"))
+    series_link = soup.find(name="a", href=re.compile(r"/index/index/series/cate/\d+"))
     if series_link:
-        href = series_link.get("href", "")
+        href = _get_attr_str(series_link, "href")
         label = series_link.get_text(strip=True)
         cate_match = re.search(r"/cate/(\d+)", href)
         taxonomy_entries.append({
@@ -761,12 +896,12 @@ def _parse_zh_product_detail(html: str, url: str, cn_id: str) -> dict[str, Any]:
 
     # Category text
     for cat_text in ["gunpla", "characterplastic", "30ML"]:
-        cat_link = soup.find("a", href=re.compile(cat_text, re.I))
+        cat_link = soup.find(name="a", href=re.compile(cat_text, re.I))
         if cat_link:
             taxonomy_entries.append({
                 "kind": "category",
                 "label": cat_link.get_text(strip=True) or cat_text,
-                "url": cat_link.get("href", ""),
+                "url": _get_attr_str(cat_link, "href"),
             })
 
     if taxonomy_entries:

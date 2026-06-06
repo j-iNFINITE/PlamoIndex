@@ -29,6 +29,7 @@ from plamoindex.models.manual import ManualRecord
 from plamoindex.models.product import ProductRecord, ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
 from plamoindex.output.writer import write_dataset
+from plamoindex.sources.base import SourceCollection
 from plamoindex.sources.registry import get_source, list_sources
 
 
@@ -55,6 +56,7 @@ def build_dataset(
     curated_dir: Path | None = None,
     dist_dir: Path | None = None,
     raw_dir: Path | None = None,
+    collect_live: bool = False,
 ) -> DatasetResult:
     """Build the full dataset.
 
@@ -71,6 +73,7 @@ def build_dataset(
         curated_dir: Path to curated/ directory. None = use config.
         dist_dir: Path to dist/ directory. None = use config.
         raw_dir: Path to raw/ directory for cached collection data. None = use config.
+        collect_live: If True, collect live source data. If False, load raw cache.
 
     Returns:
         DatasetResult with build results.
@@ -91,7 +94,8 @@ def build_dataset(
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Step 1: Collect from source plugins
+    # Step 1: Load source records from raw cache by default. Live collection is
+    # performed by collect_sources() and by `plamoindex collect`.
     for sid in source_ids:
         try:
             plugin = get_source(sid)
@@ -100,19 +104,21 @@ def build_dataset(
             if hasattr(plugin, "configure"):
                 plugin.configure(config, raw_dir)
 
-            manuals = plugin.collect_manuals()
-            product_sources = plugin.collect_product_sources()
+            collection = (
+                plugin.collect_all_records()
+                if collect_live
+                else plugin.load_cached_records(raw_dir)
+            )
 
-            result.manuals.extend(manuals)
-            result.product_sources.extend(product_sources)
-
-            # Collect relationships from plugins
-            relationships = plugin.collect_relationships()
-            result.relationships.extend(relationships)
+            result.manuals.extend(collection.manuals)
+            result.product_sources.extend(collection.product_sources)
+            result.relationships.extend(collection.relationships)
 
             result.source_statuses[sid] = {
-                "status": "ok",
-                "record_count": len(manuals),
+                "status": "ok" if collection.record_count else "missing",
+                "record_count": len(collection.manuals),
+                "product_source_count": len(collection.product_sources),
+                "relationship_count": len(collection.relationships),
                 "collected_at": generated_at,
             }
         except Exception as exc:
@@ -121,7 +127,6 @@ def build_dataset(
                 "error": str(exc),
                 "record_count": 0,
             }
-            result.errors.append(f"Source '{sid}' failed: {exc}")
 
     # Step 2: Load curated data
     try:
@@ -151,6 +156,20 @@ def build_dataset(
     except ValueError as exc:
         result.errors.append(f"Product merge failed: {exc}")
 
+    # Infer cross-family manual-product relationships after product merge.
+    try:
+        from plamoindex.merge import infer_manual_product_relationships
+
+        inferred_rels = infer_manual_product_relationships(
+            result.manuals,
+            result.products,
+            curated_mappings=curated_mappings,
+            existing_relationships=result.relationships,
+        )
+        result.relationships.extend(inferred_rels)
+    except ValueError as exc:
+        result.errors.append(f"Relationship inference failed: {exc}")
+
     # Step 4: Validate
     validation_errors = validate_final_dataset(
         result.manuals,
@@ -160,7 +179,16 @@ def build_dataset(
     )
     result.errors.extend(validation_errors)
 
-    # Step 5: Write dist files (if no validation errors or if we have data)
+    if (
+        source_ids
+        and not result.manuals
+        and not result.products
+        and not result.product_sources
+        and not curated_vendors
+    ):
+        result.errors.append("No automated or curated records available to build dataset.")
+
+    # Step 5: Write dist files (if no fatal validation errors or if we have data)
     if not result.errors or (result.manuals or result.products):
         try:
             dataset_version = datetime.now(timezone.utc).strftime("%Y.%m.%d")
@@ -176,5 +204,50 @@ def build_dataset(
             )
         except Exception as exc:
             result.errors.append(f"Output write failed: {exc}")
+
+    return result
+
+
+def collect_sources(
+    config: PlamoIndexConfig,
+    source_ids: list[str] | None = None,
+    raw_dir: Path | None = None,
+) -> DatasetResult:
+    """Collect live source data once per source and persist raw cache records."""
+    result = DatasetResult()
+
+    if source_ids is None:
+        source_ids = list_sources()
+
+    if raw_dir is None:
+        raw_dir = Path(config.raw.path)
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    for sid in source_ids:
+        try:
+            plugin = get_source(sid)
+            if hasattr(plugin, "configure"):
+                plugin.configure(config, raw_dir)
+            collection: SourceCollection = plugin.collect_all_records()
+            result.manuals.extend(collection.manuals)
+            result.product_sources.extend(collection.product_sources)
+            result.relationships.extend(collection.relationships)
+            result.source_statuses[sid] = {
+                "status": "ok",
+                "record_count": len(collection.manuals),
+                "product_source_count": len(collection.product_sources),
+                "relationship_count": len(collection.relationships),
+                "collected_at": generated_at,
+            }
+        except Exception as exc:
+            result.source_statuses[sid] = {
+                "status": "failed",
+                "error": str(exc),
+                "record_count": 0,
+                "product_source_count": 0,
+                "relationship_count": 0,
+            }
+            result.errors.append(f"Source '{sid}' failed: {exc}")
 
     return result

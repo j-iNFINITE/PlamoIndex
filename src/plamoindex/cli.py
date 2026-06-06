@@ -20,7 +20,8 @@ import click
 from plamoindex import __version__
 from plamoindex.config import load_config
 from plamoindex.curated.validator import validate_curated_directory
-from plamoindex.dataset import build_dataset
+from plamoindex.dataset import build_dataset, collect_sources
+from plamoindex.output.checksums import sha256_hex
 from plamoindex.sources.registry import get_source, list_sources
 
 
@@ -100,50 +101,25 @@ def collect(source: tuple[str, ...], raw_dir: str | None, config_path: str | Non
 
     click.echo(f"Collecting from {len(source_ids)} source(s) into {raw_path}...")
 
-    total_manuals = 0
-    total_product_sources = 0
-    total_products = 0
-    total_relationships = 0
-    failures = 0
+    result = collect_sources(config, source_ids=source_ids, raw_dir=raw_path)
 
-    for sid in source_ids:
-        try:
-            plugin = get_source(sid)
-
-            # Configure plugin with raw path
-            if hasattr(plugin, "configure"):
-                plugin.configure(config, raw_path)
-
-            manuals = plugin.collect_manuals()
-            product_sources = plugin.collect_product_sources()
-            products = plugin.collect_products()
-            relationships = plugin.collect_relationships()
-
-            click.echo(f"  {sid}:")
-            click.echo(f"    manuals: {len(manuals)}")
-            click.echo(f"    product_sources: {len(product_sources)}")
-            click.echo(f"    products: {len(products)}")
-            click.echo(f"    relationships: {len(relationships)}")
-
-            total_manuals += len(manuals)
-            total_product_sources += len(product_sources)
-            total_products += len(products)
-            total_relationships += len(relationships)
-        except KeyError as exc:
-            click.echo(f"  {sid}: ERROR - {exc}", err=True)
-            failures += 1
-        except Exception as exc:
-            click.echo(f"  {sid}: FAILED - {exc}", err=True)
-            failures += 1
+    for sid, status in result.source_statuses.items():
+        click.echo(f"  {sid}:")
+        if status.get("status") == "failed":
+            click.echo(f"    FAILED: {status.get('error', 'unknown error')}", err=True)
+        else:
+            click.echo(f"    manuals: {status.get('record_count', 0)}")
+            click.echo(f"    product_sources: {status.get('product_source_count', 0)}")
+            click.echo(f"    relationships: {status.get('relationship_count', 0)}")
 
     click.echo("\nCollection complete.")
-    click.echo(f"  Total manuals: {total_manuals}")
-    click.echo(f"  Total product_sources: {total_product_sources}")
-    click.echo(f"  Total products: {total_products}")
-    click.echo(f"  Total relationships: {total_relationships}")
-    if failures:
-        click.echo(f"  Failures: {failures}", err=True)
-        sys.exit(1)
+    click.echo(f"  Total manuals: {len(result.manuals)}")
+    click.echo(f"  Total product_sources: {len(result.product_sources)}")
+    click.echo(f"  Total relationships: {len(result.relationships)}")
+    if result.errors:
+        click.echo(f"  Failures: {len(result.errors)}", err=True)
+        if not result.manuals and not result.product_sources and not result.relationships:
+            sys.exit(1)
 
 
 @main.group()
@@ -290,19 +266,18 @@ def sync(
 ) -> None:
     """Collect from sources and build dataset in one step."""
     ctx = click.get_current_context()
-    # Run collect first
+    raw_path = raw_dir
     ctx.invoke(
         collect,
         source=source,
-        raw_dir=raw_dir,
+        raw_dir=raw_path,
         config_path=config_path,
     )
-    # Then build
     ctx.invoke(
         build,
         source=source,
         curated_dir=curated_dir,
-        raw_dir=raw_dir,
+        raw_dir=raw_path,
         dist_dir=dist_dir,
         config_path=config_path,
     )
@@ -387,6 +362,17 @@ def validate(dist_dir: str) -> None:
     missing_checksums = [fn for fn in files_with_checksum if fn not in checksums]
     if missing_checksums:
         click.echo(f"Missing checksums for: {missing_checksums}", err=True)
+        sys.exit(1)
+
+    mismatched_checksums = []
+    for fn in files_with_checksum:
+        actual = sha256_hex(ddir / fn)
+        expected = checksums.get(fn)
+        if expected != actual:
+            mismatched_checksums.append(fn)
+
+    if mismatched_checksums:
+        click.echo(f"Checksum mismatch for: {mismatched_checksums}", err=True)
         sys.exit(1)
 
     # Validate each JSON file is valid

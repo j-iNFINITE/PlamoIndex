@@ -69,13 +69,3 @@ exclude = ["tests/"]
 [[tool.mypy.overrides]]
 module = ["bs4", "bs4.*", "lxml", "lxml.*"]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = [
-    "plamoindex.sources.bandai_manual",
-    "plamoindex.sources.bandai_schedule",
-    "plamoindex.sources.kotobukiya_collector",
-    "plamoindex.sources.bandai",
-    "plamoindex.sources.kotobukiya",
-]
-ignore_errors = true

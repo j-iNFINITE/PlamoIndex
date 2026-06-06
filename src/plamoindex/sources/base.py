@@ -8,10 +8,31 @@ an official source.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
 
 from plamoindex.models.manual import ManualRecord
 from plamoindex.models.product import ProductRecord, ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
+
+
+@dataclass
+class SourceCollection:
+    """All normalized records produced by a source in one pass."""
+
+    manuals: list[ManualRecord]
+    product_sources: list[ProductSourceRecord]
+    relationships: list[RelationshipRecord]
+
+    @classmethod
+    def empty(cls) -> "SourceCollection":
+        """Return an empty source collection."""
+        return cls(manuals=[], product_sources=[], relationships=[])
+
+    @property
+    def record_count(self) -> int:
+        """Return the total records in this collection."""
+        return len(self.manuals) + len(self.product_sources) + len(self.relationships)
 
 
 class SourcePlugin(ABC):
@@ -74,6 +95,26 @@ class SourcePlugin(ABC):
         has explicit relationship data.
         """
         return []
+
+    def collect_all_records(self) -> SourceCollection:
+        """Collect all normalized records from this source in one pass.
+
+        Source plugins with multiple record families should override this to
+        avoid crawling the same website repeatedly.
+        """
+        return SourceCollection(
+            manuals=self.collect_manuals(),
+            product_sources=self.collect_product_sources(),
+            relationships=self.collect_relationships(),
+        )
+
+    def load_cached_records(self, raw_dir: Path) -> SourceCollection:
+        """Load normalized records previously written by collection.
+
+        Base implementation returns no records. Source plugins that support
+        `build --raw` override this.
+        """
+        return SourceCollection.empty()
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}: {self.source_id}>"

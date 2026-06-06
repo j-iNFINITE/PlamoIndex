@@ -25,6 +25,17 @@ _DETAIL_URL = f"{_BASE_URL}/menus/detail/{{manual_id}}"
 _PDF_URL_TPL = f"{_BASE_URL}/pdf/{{manual_id}}.pdf"
 
 
+def _get_attr_str(tag: Tag, name: str) -> str:
+    """Return a tag attribute only when it is a string."""
+    value = tag.get(name)
+    return value if isinstance(value, str) else ""
+
+
+def _clean_text(text: str) -> str:
+    """Collapse source HTML whitespace into readable text."""
+    return " ".join(text.split())
+
+
 class BandaiManualCollector(BaseCollector):
     """Collector for Bandai manual pages from manual.bandai-hobby.net."""
 
@@ -69,6 +80,8 @@ class BandaiManualCollector(BaseCollector):
         """
         entries: list[dict[str, Any]] = []
         page = 1
+        seen_page_signatures: set[tuple[str, ...]] = set()
+        seen_manual_ids: set[str] = set()
 
         while True:
             url = f"{_LIST_URL}?page={page}"
@@ -82,7 +95,31 @@ class BandaiManualCollector(BaseCollector):
                 if not page_entries:
                     break  # No more entries
 
-                entries.extend(page_entries)
+                page_signature = tuple(entry["manual_id"] for entry in page_entries)
+                if page_signature in seen_page_signatures:
+                    logger.info(
+                        "Stopping Bandai manual pagination at page %d: repeated page signature.",
+                        page,
+                    )
+                    break
+                seen_page_signatures.add(page_signature)
+
+                new_entries = [
+                    entry
+                    for entry in page_entries
+                    if entry["manual_id"] not in seen_manual_ids
+                ]
+                if not new_entries:
+                    logger.info(
+                        "Stopping Bandai manual pagination at page %d: no new manual ids.",
+                        page,
+                    )
+                    break
+
+                for entry in new_entries:
+                    seen_manual_ids.add(entry["manual_id"])
+
+                entries.extend(new_entries)
                 page += 1
             except Exception as exc:
                 logger.warning("Failed to fetch list page %d: %s", page, exc)
@@ -127,7 +164,11 @@ def _parse_list_page(html: str, source_url: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "lxml")
     entries: list[dict[str, Any]] = []
 
-    manual_items = soup.select(".menu-item, .manual-item, [class*='menu-item'], [class*='manual-item'], tr")
+    manual_items = soup.select(".bl_result_item")
+    if not manual_items:
+        manual_items = soup.select(
+            ".menu-item, .manual-item, [class*='menu-item'], [class*='manual-item'], tr"
+        )
     if not manual_items:
         manual_items = soup.select("a[href*='/menus/detail/']")
 
@@ -144,40 +185,64 @@ def _parse_list_page(html: str, source_url: str) -> list[dict[str, Any]]:
 
 def _parse_single_list_item(item: Tag) -> dict[str, Any] | None:
     """Parse a single manual item from the list page."""
-    detail_link = item.find("a", href=re.compile(r"/menus/detail/\d+"))
+    detail_link: Tag | None
+    if item.name == "a" and re.search(r"/menus/detail/\d+", _get_attr_str(item, "href")):
+        detail_link = item
+    else:
+        detail_link = item.find(name="a", href=re.compile(r"/menus/detail/\d+"))
     if not detail_link:
-        detail_link = item.find("a", href=re.compile(r"detail"))
+        detail_link = item.find(name="a", href=re.compile(r"detail"))
     if not detail_link:
         return None
 
-    href = detail_link.get("href", "")
+    href = _get_attr_str(detail_link, "href")
     manual_id_match = re.search(r"/menus/detail/(\d+)", href)
     if not manual_id_match:
         return None
     manual_id = manual_id_match.group(1)
 
-    title_text = detail_link.get_text(strip=True) or ""
-
     # Try to extract Japanese and English titles
-    title_ja = title_text
     title_en = None
+    name_elem = item.select_one(".bl_result_name")
+    en_title_elem = item.select_one(".bl_result_name_en")
+    if en_title_elem:
+        title_en = _clean_text(en_title_elem.get_text(" ", strip=True))
+
+    if name_elem:
+        title_ja = _clean_text(
+            " ".join(
+                text.strip()
+                for text in name_elem.find_all(string=True, recursive=False)
+                if text.strip()
+            )
+        )
+    else:
+        title_ja = _clean_text(detail_link.get_text(" ", strip=True))
 
     # Find image for thumbnail
     img = item.find("img")
-    image_url = img.get("src") if img and img.get("src") else None
+    image_url = _get_attr_str(img, "src") if img else None
     if image_url and not image_url.startswith("http"):
         image_url = f"{_BASE_URL}{image_url}" if image_url.startswith("/") else image_url
 
     # Find release date text
     release_text = None
-    date_elem = item.find(["span", "p", "div"], class_=re.compile(r"date|release", re.I))
+    date_elem = item.find(name=["span", "p", "div"], class_=re.compile(r"date|release", re.I))
+    caption = item.select_one(".bl_result_caption")
+    if caption:
+        for row in caption.find_all("dd"):
+            row_text = _clean_text(row.get_text(" ", strip=True))
+            if row_text:
+                release_text = row_text
+                break
     if date_elem:
-        release_text = date_elem.get_text(strip=True)
+        release_text = _clean_text(date_elem.get_text(" ", strip=True))
 
     # Check for English title (often in a separate element)
-    en_title_elem = item.find(["span", "p", "div"], class_=re.compile(r"en|english|title-en", re.I))
-    if en_title_elem:
-        title_en = en_title_elem.get_text(strip=True)
+    if not title_en:
+        en_title_elem = item.find(name=["span", "p", "div"], class_=re.compile(r"en|english|title-en", re.I))
+        if en_title_elem:
+            title_en = _clean_text(en_title_elem.get_text(" ", strip=True))
 
     entry: dict[str, Any] = {
         "manual_id": manual_id,
@@ -189,6 +254,11 @@ def _parse_single_list_item(item: Tag) -> dict[str, Any] | None:
         "pdf_url": _PDF_URL_TPL.format(manual_id=manual_id),
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    if release_text:
+        parsed_release = _parse_release_date(release_text)
+        if parsed_release:
+            entry.update(parsed_release)
 
     return entry
 
@@ -248,7 +318,12 @@ def _parse_detail_page(html: str, url: str, manual_id: str) -> dict[str, Any]:
         detail["series_text"] = series_text
 
     # PDF URL from viewer data
-    viewer_script = soup.find("script", string=re.compile(r"pdf|viewer", re.I))
+    viewer_script = None
+    for script in soup.find_all(name="script"):
+        script_text_for_match = script.string or script.get_text()
+        if script_text_for_match and re.search(r"pdf|viewer", script_text_for_match, re.I):
+            viewer_script = script
+            break
     if viewer_script:
         script_text = str(viewer_script.string) if viewer_script.string else ""
         pdf_match = re.search(r'/pdf/\d+\.pdf', script_text)
@@ -265,17 +340,22 @@ def _find_text_after_label(soup: BeautifulSoup, labels: list[str]) -> str | None
     sibling or parent sibling's text content.
     """
     for label in labels:
-        label_elem = soup.find(["th", "dt", "span", "p", "div"], string=re.compile(re.escape(label), re.I))
-        if label_elem:
-            next_elem = label_elem.find_next(["td", "dd", "span", "p", "div"])
+        label_elem = None
+        pattern = re.compile(re.escape(label), re.I)
+        for candidate in soup.find_all(name=["th", "dt", "span", "p", "div"]):
+            if pattern.search(candidate.get_text(strip=True)):
+                label_elem = candidate
+                break
+        if label_elem is not None:
+            next_elem = label_elem.find_next(name=["td", "dd", "span", "p", "div"])
             if next_elem:
-                return next_elem.get_text(strip=True)
+                return str(next_elem.get_text(strip=True))
             # Try parent's next sibling
             parent = label_elem.parent
             if parent:
-                next_sibling = parent.find_next_sibling(["td", "dd", "div"])
+                next_sibling = parent.find_next_sibling(name=["td", "dd", "div"])
                 if next_sibling:
-                    return next_sibling.get_text(strip=True)
+                    return str(next_sibling.get_text(strip=True))
     return None
 
 

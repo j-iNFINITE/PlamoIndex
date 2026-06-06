@@ -22,7 +22,7 @@ from plamoindex.models.shared import (
     ReleaseInfo,
     TaxonomyRef,
 )
-from plamoindex.sources.base import SourcePlugin
+from plamoindex.sources.base import SourceCollection, SourcePlugin
 from plamoindex.sources.kotobukiya_collector import KotobukiyaCollector
 
 
@@ -38,11 +38,13 @@ class KotobukiyaSource(SourcePlugin):
     def __init__(self) -> None:
         self._config: PlamoIndexConfig | None = None
         self._raw_dir: Path | None = None
+        self._collection: SourceCollection | None = None
 
     def configure(self, config: PlamoIndexConfig, raw_dir: Path | None = None) -> None:
         """Configure the source plugin with runtime settings."""
         self._config = config
         self._raw_dir = raw_dir
+        self._collection = None
 
     @property
     def source_id(self) -> str:
@@ -54,35 +56,11 @@ class KotobukiyaSource(SourcePlugin):
 
     def collect_manuals(self) -> list[ManualRecord]:
         """Collect Kotobukiya instruction/manual records."""
-        config = self._config or PlamoIndexConfig()
-        raw_dir = self._raw_dir or Path(config.raw.path)
-        raw_dir.mkdir(parents=True, exist_ok=True)
-
-        fetch_client = FetchClient(config)
-        cache = CollectorCache(raw_dir, "kotobukiya")
-        collector = KotobukiyaCollector(fetch_client, cache)
-
-        try:
-            result = collector.collect_all()
-            return [_manual_dict_to_record(m) for m in result.manuals]
-        finally:
-            collector.close()
+        return self.collect_all_records().manuals
 
     def collect_product_sources(self) -> list[ProductSourceRecord]:
         """Collect Kotobukiya product source records."""
-        config = self._config or PlamoIndexConfig()
-        raw_dir = self._raw_dir or Path(config.raw.path)
-        raw_dir.mkdir(parents=True, exist_ok=True)
-
-        fetch_client = FetchClient(config)
-        cache = CollectorCache(raw_dir, "kotobukiya")
-        collector = KotobukiyaCollector(fetch_client, cache)
-
-        try:
-            result = collector.collect_all()
-            return [_product_source_dict_to_record(ps) for ps in result.product_sources]
-        finally:
-            collector.close()
+        return self.collect_all_records().product_sources
 
     def collect_products(self) -> list[ProductRecord]:
         """Product merging is handled by merge.py."""
@@ -90,6 +68,13 @@ class KotobukiyaSource(SourcePlugin):
 
     def collect_relationships(self) -> list[RelationshipRecord]:
         """Collect Kotobukiya confirmed relationships."""
+        return self.collect_all_records().relationships
+
+    def collect_all_records(self) -> SourceCollection:
+        """Collect Kotobukiya manuals, products, and relationships once."""
+        if self._collection is not None:
+            return self._collection
+
         config = self._config or PlamoIndexConfig()
         raw_dir = self._raw_dir or Path(config.raw.path)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -100,9 +85,41 @@ class KotobukiyaSource(SourcePlugin):
 
         try:
             result = collector.collect_all()
-            return [_relationship_dict_to_record(r) for r in result.relationships]
+            self._collection = SourceCollection(
+                manuals=[_manual_dict_to_record(m) for m in result.manuals],
+                product_sources=[
+                    _product_source_dict_to_record(ps)
+                    for ps in result.product_sources
+                ],
+                relationships=[
+                    _relationship_dict_to_record(r)
+                    for r in result.relationships
+                ],
+            )
+            return self._collection
         finally:
             collector.close()
+
+    def load_cached_records(self, raw_dir: Path) -> SourceCollection:
+        """Load Kotobukiya records from the raw collection cache."""
+        cache = CollectorCache(raw_dir, "kotobukiya")
+        try:
+            return SourceCollection(
+                manuals=[
+                    _manual_dict_to_record(m)
+                    for m in cache.load_records("manuals.json")
+                ],
+                product_sources=[
+                    _product_source_dict_to_record(ps)
+                    for ps in cache.load_records("product_sources.json")
+                ],
+                relationships=[
+                    _relationship_dict_to_record(r)
+                    for r in cache.load_records("relationships.json")
+                ],
+            )
+        finally:
+            cache.close()
 
 
 def _manual_dict_to_record(d: dict[str, Any]) -> ManualRecord:
@@ -243,7 +260,7 @@ def _relationship_dict_to_record(d: dict[str, Any]) -> RelationshipRecord:
     rel_type = d.get("relationship", "manual_for_product")
     status = d.get("status", "confirmed")
 
-    relationship_key = f"rel:{rel_type}:{from_key}:{to_key}"
+    relationship_key = f"rel:manual-product:{from_key}:{to_key}"
 
     provenance_data = d.get("provenance", {})
     if isinstance(provenance_data, dict):

@@ -6,8 +6,14 @@ from datetime import datetime
 
 import pytest
 
-from plamoindex.curated.loader import CuratedOverrideEntry
-from plamoindex.merge import DuplicateKeyError, merge_manuals, merge_product_sources, validate_final_dataset
+from plamoindex.curated.loader import CuratedMappingEntry, CuratedOverrideEntry
+from plamoindex.merge import (
+    DuplicateKeyError,
+    infer_manual_product_relationships,
+    merge_manuals,
+    merge_product_sources,
+    validate_final_dataset,
+)
 from plamoindex.models.manual import ManualRecord
 from plamoindex.models.product import ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
@@ -182,6 +188,78 @@ class TestMergeProductSources:
         ]
         products, _ = merge_product_sources([ja, en])
         assert len(products[0].prices) == 2
+
+    def test_curated_zh_mapping_merges_into_existing_bandai_product(self) -> None:
+        ja = _make_product_source(
+            "bandai-schedule:ja:01_7017",
+            locale="ja",
+            source="bandai_schedule_ja",
+            pid="01_7017",
+        )
+        en = _make_product_source(
+            "bandai-schedule:en:01_7017",
+            locale="en",
+            source="bandai_schedule_en",
+            pid="01_7017",
+        )
+        zh = _make_product_source(
+            "bandai-schedule:zh-Hans:3236",
+            locale="zh-Hans",
+            source="bandai_schedule_zh",
+            pid="3236",
+        )
+        zh.title = "ZH Product"
+        mapping = CuratedMappingEntry(
+            product_key="bandai-product:01_7017",
+            zh_schedule_key="bandai-schedule:zh-Hans:3236",
+            status="confirmed",
+            reason="Confirmed fixture mapping",
+        )
+
+        products, rels = merge_product_sources([ja, en, zh], curated_mappings=[mapping])
+
+        assert [p.product_key for p in products] == ["bandai-product:01_7017"]
+        assert products[0].titles["zh-Hans"] == "ZH Product"
+        assert "bandai-schedule:zh-Hans:3236" in products[0].related_product_sources
+        assert validate_final_dataset([], products, [ja, en, zh], rels) == []
+
+    def test_infers_bandai_bilingual_manual_product_relationship(self) -> None:
+        manual = ManualRecord(
+            manual_source_key="bandai:5119",
+            source="bandai",
+            manual_source_id="5119",
+            title="HG 1/144 サンドロックカスタムEW",
+            title_en="HG 1/144 GUNDAM SANDROCK CUSTOM EW",
+            localized_titles={
+                "ja": "HG 1/144 サンドロックカスタムEW",
+                "en": "HG 1/144 GUNDAM SANDROCK CUSTOM EW",
+            },
+            brand="BANDAI SPIRITS",
+            provenance=_make_provenance(),
+        )
+        ja = _make_product_source(
+            "bandai-schedule:ja:01_7017",
+            locale="ja",
+            source="bandai_schedule_ja",
+            pid="01_7017",
+        )
+        ja.title = "HG 1/144 サンドロックカスタムEW"
+        en = _make_product_source(
+            "bandai-schedule:en:01_7017",
+            locale="en",
+            source="bandai_schedule_en",
+            pid="01_7017",
+        )
+        en.title = "HG 1/144 GUNDAM SANDROCK CUSTOM EW"
+        products, existing_rels = merge_product_sources([ja, en])
+
+        rels = infer_manual_product_relationships([manual], products, existing_relationships=existing_rels)
+
+        assert len(rels) == 1
+        assert rels[0].relationship_key == "rel:manual-product:bandai:5119:bandai-product:01_7017"
+        assert rels[0].status == "matched"
+        assert manual.related_products is not None
+        assert products[0].related_manuals is not None
 
 
 class TestValidateFinalDataset:

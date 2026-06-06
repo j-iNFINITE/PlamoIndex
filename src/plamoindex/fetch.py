@@ -131,16 +131,17 @@ class FetchClient:
             try:
                 response = self._client.get(url, headers=merged_headers)
 
-                if response.status_code in (429, 503, 502, 504):
+                if response.status_code in (403, 408, 429, 500, 502, 503, 504):
                     stats.rate_limits += 1
                     retry_after = _parse_retry_after(response)
                     backoff = retry_after or (2 ** attempt * delay_config.backoff_base)
                     logger.warning(
-                        "Rate limited on %s (status %d). Backing off %.1fs.",
+                        "Transient or rate-limited response on %s (status %d). Backing off %.1fs.",
                         url, response.status_code, backoff,
                     )
                     time.sleep(backoff)
                     stats.retries += 1
+                    last_error = FetchError(f"HTTP {response.status_code} for {url}")
                     continue
 
                 if response.status_code >= 500:
@@ -151,7 +152,12 @@ class FetchClient:
                     )
                     time.sleep(backoff)
                     stats.retries += 1
+                    last_error = FetchError(f"HTTP {response.status_code} for {url}")
                     continue
+
+                if response.status_code < 200 or response.status_code >= 300:
+                    stats.errors += 1
+                    raise FetchError(f"HTTP {response.status_code} for {url}")
 
                 # Successful response
                 text = response.text
@@ -218,8 +224,14 @@ class FetchClient:
             if source_id in domain or domain in source_id or source_id.replace("_", "") in domain:
                 return _DomainDelayConfig(
                     delay_seconds=source_cfg.get("delay_seconds", self.config.http.delay_seconds),
+                    jitter_seconds=source_cfg.get("jitter_seconds", self.config.http.jitter_seconds),
+                    backoff_base=source_cfg.get("backoff_base", self.config.http.backoff_base),
                 )
-        return _DomainDelayConfig(delay_seconds=self.config.http.delay_seconds)
+        return _DomainDelayConfig(
+            delay_seconds=self.config.http.delay_seconds,
+            jitter_seconds=self.config.http.jitter_seconds,
+            backoff_base=self.config.http.backoff_base,
+        )
 
 
 @dataclass

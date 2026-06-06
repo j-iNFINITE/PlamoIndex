@@ -13,6 +13,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
@@ -24,6 +25,34 @@ _BASE_URL = "https://www.kotobukiya.co.jp"
 _LIST_URL = f"{_BASE_URL}/en/instructions/"
 _DETAIL_URL = f"{_BASE_URL}/en/instructions/detail/{{instruction_id}}/"
 _PRODUCT_URL = f"{_BASE_URL}/en/product/detail/{{product_id}}/"
+
+
+def _get_attr_str(tag: Tag, name: str) -> str:
+    """Return a tag attribute only when it is a string."""
+    value = tag.get(name)
+    return value if isinstance(value, str) else ""
+
+
+def _clean_text(text: str) -> str:
+    """Collapse source HTML whitespace into readable text."""
+    return " ".join(text.split())
+
+
+def _find_text_tag(tag: Tag, tags: list[str], pattern: re.Pattern[str]) -> Tag | None:
+    """Find the first descendant tag whose text matches a pattern."""
+    for candidate in tag.find_all(name=tags):
+        if pattern.search(candidate.get_text(strip=True)):
+            return candidate
+    return None
+
+
+def _find_text_tags(tag: Tag, tags: list[str], pattern: re.Pattern[str]) -> list[Tag]:
+    """Find descendant tags whose text matches a pattern."""
+    return [
+        candidate
+        for candidate in tag.find_all(name=tags)
+        if pattern.search(candidate.get_text(strip=True))
+    ]
 
 
 class KotobukiyaCollector(BaseCollector):
@@ -222,7 +251,11 @@ def _parse_instruction_list(html: str, source_url: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "lxml")
     entries: list[dict[str, Any]] = []
 
-    items = soup.select(".instruction-item, [class*='instruction'], .list-item, tr, article")
+    items = soup.select(".manualList_item")
+    if not items:
+        items = soup.select(".manualList_card")
+    if not items:
+        items = soup.select(".instruction-item, [class*='instruction'], .list-item, tr, article")
     if not items:
         items = soup.find_all("a", href=re.compile(r"/en/instructions/detail/\d+"))
 
@@ -239,39 +272,55 @@ def _parse_instruction_list(html: str, source_url: str) -> list[dict[str, Any]]:
 
 def _parse_single_instruction_item(item: Tag) -> dict[str, Any] | None:
     """Parse a single instruction list item."""
-    link = item.find("a", href=re.compile(r"/en/instructions/detail/\d+"))
+    link = item.select_one(".manualList_manual a[href*='/en/instructions/detail/']")
     if not link:
-        if isinstance(item, Tag) and item.name == "a" and "detail" in item.get("href", ""):
+        link = item.find(name="a", href=re.compile(r"/en/instructions/detail/\d+"))
+    if not link:
+        if isinstance(item, Tag) and item.name == "a" and "detail" in _get_attr_str(item, "href"):
             link = item
         else:
             return None
 
-    href = link.get("href", "")
+    href = _get_attr_str(link, "href")
     id_match = re.search(r"/detail/(\d+)", href)
     if not id_match:
         return None
     instruction_id = id_match.group(1)
 
-    title = link.get_text(strip=True) or ""
+    title_elem = item.select_one(".manualList_title")
+    title = (
+        _clean_text(title_elem.get_text(" ", strip=True))
+        if title_elem
+        else _clean_text(link.get_text(" ", strip=True))
+    )
 
     # Image
     img = item.find("img")
-    image_url = img.get("src") if img and img.get("src") else None
-    if image_url and isinstance(image_url, str):
-        if image_url.startswith("/"):
-            image_url = f"{_BASE_URL}{image_url}"
+    image_url = _get_attr_str(img, "src") if img else None
+    if image_url:
+        image_url = urljoin(_BASE_URL, image_url)
 
     # Product code
-    code_elem = item.find(["span", "p", "div"], string=re.compile(r"PV\d+|[A-Z]{2,}\d+"))
-    product_code = code_elem.get_text(strip=True) if code_elem else None
+    code_elem = item.select_one(".manualList_proNumber dd")
+    if not code_elem:
+        code_elem = _find_text_tag(item, ["span", "p", "div", "dd"], re.compile(r"Product Code|PV\d+|[A-Z]{2,}\d+"))
+    code_text = _clean_text(code_elem.get_text(" ", strip=True)) if code_elem else ""
+    code_match = re.search(r"(PV\d+|[A-Z]{2,}\d+)", code_text)
+    product_code = code_match.group(1) if code_match else None
 
     # Language
-    lang_text = item.get_text()
+    lang_text = link.get_text(" ", strip=True)
     languages = []
     if "JPN" in lang_text or "日本語" in lang_text:
         languages.append("ja")
     if "ENG" in lang_text or "English" in lang_text or "英語" in lang_text:
         languages.append("en")
+
+    product_link = None
+    product_link_tag = item.select_one(".manualList_more a[href*='/en/product/detail/']")
+    if product_link_tag:
+        href = _get_attr_str(product_link_tag, "href")
+        product_link = urljoin(_BASE_URL, href) if href else None
 
     entry: dict[str, Any] = {
         "instruction_id": instruction_id,
@@ -279,6 +328,7 @@ def _parse_single_instruction_item(item: Tag) -> dict[str, Any] | None:
         "image_url": image_url,
         "manufacturer_item_code": product_code,
         "languages": languages if languages else None,
+        "product_link": product_link,
         "source_url": _DETAIL_URL.format(instruction_id=instruction_id),
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -320,7 +370,7 @@ def _parse_instruction_detail(html: str, url: str, instruction_id: str) -> dict[
     pdf_urls: dict[str, str] = {}
     pdf_links = soup.find_all("a", href=re.compile(r"/en/instructions/dl-"))
     for pdf_link in pdf_links:
-        href = pdf_link.get("href", "")
+        href = _get_attr_str(pdf_link, "href")
         if not href:
             continue
         full_url = f"{_BASE_URL}{href}" if href.startswith("/") else href
@@ -342,7 +392,7 @@ def _parse_instruction_detail(html: str, url: str, instruction_id: str) -> dict[
     if not img_links:
         img_links = soup.find_all("img", src=re.compile(r"inst"))
     for img in img_links:
-        src = img.get("src", "")
+        src = _get_attr_str(img, "src")
         if isinstance(src, str) and src:
             full_url = f"{_BASE_URL}{src}" if src.startswith("/") else src
             preview_images.append(full_url)
@@ -351,11 +401,18 @@ def _parse_instruction_detail(html: str, url: str, instruction_id: str) -> dict[
         detail["manual_preview_images"] = preview_images
 
     # Product detail link
-    product_link = soup.find("a", href=re.compile(r"/en/product/detail/"))
+    product_link = None
+    for link in soup.find_all(name="a", href=re.compile(r"/en/product/detail/")):
+        link_text = _clean_text(link.get_text(" ", strip=True))
+        if re.search(r"view\s+product\s+details?", link_text, re.I):
+            product_link = link
+            break
+    if product_link is None:
+        product_link = soup.find(name="a", href=re.compile(r"/en/product/detail/"))
     if product_link:
-        href = product_link.get("href", "")
+        href = _get_attr_str(product_link, "href")
         if href:
-            detail["product_link"] = f"{_BASE_URL}{href}" if href.startswith("/") else href
+            detail["product_link"] = urljoin(_BASE_URL, href)
 
     return detail
 
@@ -390,7 +447,7 @@ def _parse_product_detail(html: str, url: str, product_id: str) -> dict[str, Any
         links = breadcrumb.find_all("a")
         for link in links:
             label = link.get_text(strip=True)
-            href = link.get("href", "")
+            href = _get_attr_str(link, "href")
             if label and label not in ("Home", "TOP"):
                 if not detail.get("category") and "product" in href:
                     detail["category"] = {
@@ -406,9 +463,12 @@ def _parse_product_detail(html: str, url: str, product_id: str) -> dict[str, Any
             "kind": "category",
         }
 
-    # Release month - look for patterns like "2024.12"
-    page_text = soup.get_text()
-    release_match = re.search(r"(\d{4})\.(\d{1,2})", page_text)
+    # Release month - the product page keeps this in the detail header.
+    release_text = ""
+    release_elem = soup.select_one(".detailHeader_set-release dd")
+    if release_elem:
+        release_text = _clean_text(release_elem.get_text(" ", strip=True))
+    release_match = re.search(r"(\d{4})\.(\d{1,2})", release_text)
     if release_match:
         release_month = f"{release_match.group(1)}-{release_match.group(2).zfill(2)}"
         detail["release"] = {
@@ -417,25 +477,21 @@ def _parse_product_detail(html: str, url: str, product_id: str) -> dict[str, Any
             "market": "jp-shop",
             "release_month": release_month,
             "release_date_precision": "month",
-            "raw": f"{release_match.group(1)}.{release_match.group(2)}",
+            "raw": release_text,
         }
 
-    # Prices - look for "JPY X,XXX incl. tax" and "JPY X,XXX excl. tax"
+    # Prices - the detail header has separate tax-included and tax-excluded spans.
     prices: list[dict[str, Any]] = []
-    price_texts = []
-
-    price_blocks = soup.find_all(string=re.compile(r"JPY|¥|Yen|円"))
-    for price_block in price_blocks:
-        text = price_block.strip()
-        if text and len(text) > 5:
-            price_texts.append(text)
-
-    # Also look in table rows
-    price_rows = soup.find_all(["tr", "div", "p"], string=re.compile(r"Price|価格", re.I))
-    for row in price_rows:
-        row_text = row.get_text(strip=True)
-        if row_text and row_text not in price_texts:
-            price_texts.append(row_text)
+    price_texts = [
+        _clean_text(price.get_text(" ", strip=True))
+        for price in soup.select(".detailHeader_set-price .detailHeader_price")
+    ]
+    if not price_texts:
+        price_rows = _find_text_tags(soup, ["tr"], re.compile(r"Price|価格", re.I))
+        for row in price_rows:
+            row_text = _clean_text(row.get_text(" ", strip=True))
+            if row_text and row_text not in price_texts:
+                price_texts.append(row_text)
 
     for text in price_texts:
         price_info = _parse_kotobukiya_price(text)
@@ -445,61 +501,48 @@ def _parse_product_detail(html: str, url: str, product_id: str) -> dict[str, Any
     if prices:
         detail["prices"] = prices
 
-    # Series and Product Series
-    series_labels = soup.find_all(string=re.compile(r"MEGAMI DEVICE|series|title", re.I))
-    for s in series_labels:
-        parent_text = s.strip()
-        if "MEGAMI DEVICE" in parent_text or "MEGAMI" in parent_text:
-            detail["series"] = {"label": "MEGAMI DEVICE", "kind": "series"}
-
-    product_series_labels = soup.find_all(string=re.compile(r"Unpainted|Product Series|シリーズ", re.I))
-    for s in product_series_labels:
-        label = s.strip()
-        if label and not detail.get("product_series"):
-            detail["product_series"] = {"label": label, "kind": "product_series"}
-
-    # Specs
+    # Specs and taxonomy live in the product spec table.
+    spec_rows = _parse_spec_table(soup)
     specs: dict[str, Any] = {}
 
-    # Scale
-    scale_match = re.search(r"(\d+/\d+)", page_text)
-    if scale_match:
-        specs["scale"] = scale_match.group(1)
+    series_row = spec_rows.get("series")
+    if series_row:
+        detail["series"] = _taxonomy_from_spec_row(series_row, "series")
 
-    # Size
-    size_match = re.search(r"(\d+mm\s*(tall|long|wide|height))", page_text, re.I)
-    if size_match:
-        specs["size"] = size_match.group(1)
+    product_series_row = spec_rows.get("product series")
+    if product_series_row:
+        detail["product_series"] = _taxonomy_from_spec_row(product_series_row, "product_series")
 
-    # Specifications
-    spec_keywords = ["Unpainted", "Kit", "Painted", "PVC", "ABS", "Iron", "Acrylic", "Polyester"]
-    spec_items = [kw for kw in spec_keywords if kw.lower() in page_text.lower()]
-    if spec_items:
-        specs["specifications"] = spec_items
+    for key, spec_key in (
+        ("scale", "scale"),
+        ("size", "size"),
+        ("product material", "material"),
+        ("age rating", "age_rating"),
+    ):
+        spec_row = spec_rows.get(key)
+        if spec_row and spec_row["text"]:
+            specs[spec_key] = spec_row["text"]
 
-    # Material
-    material_match = re.search(r"PVC[^。.]+", page_text)
-    if material_match:
-        specs["material"] = material_match.group(0).strip()
+    specifications_row = spec_rows.get("specifications")
+    if specifications_row and specifications_row["items"]:
+        specs["specifications"] = specifications_row["items"]
+    elif specifications_row and specifications_row["text"]:
+        specs["specifications"] = [specifications_row["text"]]
 
-    # Age rating
-    age_match = re.search(r"Ages?\s*\d+\s*(?:and|&)\s*up", page_text, re.I)
-    if age_match:
-        specs["age_rating"] = age_match.group(0)
+    sculptors_row = spec_rows.get("sculptor(s)") or spec_rows.get("sculptors")
+    if sculptors_row and sculptors_row["text"]:
+        specs["sculptors"] = [
+            sculptor.strip()
+            for sculptor in re.split(r"[,、・]", sculptors_row["text"])
+            if sculptor.strip()
+        ]
 
-    # Sculptors
-    sculptor_match = re.search(r"Sculptor[s]?[：:]\s*([^。.]+)", page_text)
-    if sculptor_match:
-        sculptors_raw = sculptor_match.group(1)
-        specs["sculptors"] = [s.strip() for s in sculptors_raw.split("・") if s.strip()]
+    code_row = spec_rows.get("product code")
+    if code_row and code_row["text"]:
+        detail["manufacturer_item_code"] = code_row["text"]
 
     if specs:
         detail["specs"] = specs
-
-    # Product code
-    code_match = re.search(r"(PV\d+)", page_text)
-    if code_match:
-        detail["manufacturer_item_code"] = code_match.group(1)
 
     # Description
     desc_elem = soup.find(["p", "div"], class_=re.compile(r"description|desc|overview", re.I))
@@ -507,6 +550,39 @@ def _parse_product_detail(html: str, url: str, product_id: str) -> dict[str, Any
         detail["description"] = desc_elem.get_text(strip=True)
 
     return detail
+
+
+def _parse_spec_table(soup: BeautifulSoup) -> dict[str, dict[str, Any]]:
+    """Parse Kotobukiya product spec table rows by lower-case label."""
+    rows: dict[str, dict[str, Any]] = {}
+    for row in soup.select(".grid-specTable tr"):
+        header = row.find("th")
+        value = row.find("td")
+        if not header or not value:
+            continue
+        label = _clean_text(header.get_text(" ", strip=True)).lower()
+        items = [
+            _clean_text(item.get_text(" ", strip=True))
+            for item in value.find_all("li")
+            if _clean_text(item.get_text(" ", strip=True))
+        ]
+        first_link = value.find("a", href=True)
+        href = _get_attr_str(first_link, "href") if first_link else None
+        rows[label] = {
+            "text": _clean_text(value.get_text(" ", strip=True)),
+            "items": items,
+            "url": urljoin(_BASE_URL, href) if href else None,
+        }
+    return rows
+
+
+def _taxonomy_from_spec_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Build a taxonomy-like dict from a spec table row."""
+    return {
+        "label": row["text"],
+        "kind": kind,
+        "url": row.get("url"),
+    }
 
 
 def _parse_kotobukiya_price(text: str) -> dict[str, Any] | None:
