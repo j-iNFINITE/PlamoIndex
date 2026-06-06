@@ -19,3 +19,11 @@ data/raw/
 # IDE
 .vscode/
 .idea/
+
+# Local AI/Trellis workspace
+.agents/
+.claude/
+.codex/
+.trellis/
+AGENTS.md
+plamoindex-development-plan.md
