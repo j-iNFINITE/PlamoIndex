@@ -1,0 +1,25 @@
+schema_version: 1
+
+http:
+  timeout_seconds: 30
+  retry_count: 3
+  delay_seconds: 1.0
+  user_agent: "plamoindex/0.1 (+https://github.com/plamoindex/plamoindex)"
+
+sources:
+  bandai:
+    enabled: true
+    delay_seconds: 1.0
+  kotobukiya:
+    enabled: true
+    delay_seconds: 1.0
+
+curated:
+  path: curated/
+
+output:
+  dist: dist/
+  compact: true
+
+dataset:
+  base_url: "https://manuals.example.com"
