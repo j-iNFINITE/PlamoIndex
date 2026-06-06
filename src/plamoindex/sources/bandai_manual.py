@@ -130,18 +130,23 @@ class BandaiManualCollector(BaseCollector):
     def _fetch_detail(self, manual_id: str) -> dict[str, Any] | None:
         """Fetch and parse a manual detail page.
 
-        Always fetches and re-parses on each run (the HTTP request is always
-        made regardless of cache state). Cache hash is updated for change
-        detection, but detail data is always re-parsed to avoid data loss on
-        incremental collection runs.
+        Reuses the parsed detail cache when available. List pages are still
+        fetched to discover current manual IDs, but historical detail pages do
+        not need to be re-fetched on every workflow run.
         """
         url = _DETAIL_URL.format(manual_id=manual_id)
         page_id = f"detail-{manual_id}"
+        detail_filename = f"{page_id}.json"
+        cached_detail = self.cache.load_record(detail_filename)
+        if cached_detail is not None:
+            return cached_detail
 
         try:
             result = self.fetch.fetch(url)
             self.cache.put_page(page_id, result.content_hash)
-            return _parse_detail_page(result.text, url, manual_id)
+            detail = _parse_detail_page(result.text, url, manual_id)
+            self.cache.save_record(detail, detail_filename)
+            return detail
         except Exception as exc:
             logger.warning("Failed to fetch detail %s: %s", manual_id, exc)
             return None

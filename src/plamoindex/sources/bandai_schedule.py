@@ -39,6 +39,8 @@ _ZH_PRODUCT_URL = "https://bandaihobbysite.cn/index/index/detail/id/{cn_id}"
 # Default month window for collection
 _DEFAULT_PAST_MONTHS = 3
 _DEFAULT_FUTURE_MONTHS = 6
+_LOCALE_RECORD_PREFIXES = {"ja": "ja", "en": "en", "zh-Hans": "zh"}
+_DEFAULT_LOCALE_START_MONTHS = {"zh-Hans": "198909"}
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -99,16 +101,27 @@ class BandaiScheduleCollector(BaseCollector):
         future_months: int = _DEFAULT_FUTURE_MONTHS,
         start_month: str | None = None,
         end_month: str | None = None,
+        max_months_per_run: int | None = None,
+        locale_start_months: dict[str, str] | None = None,
     ) -> None:
         super().__init__(fetch_client, cache)
         self.past_months = past_months
         self.future_months = future_months
+        self.max_months_per_run = max_months_per_run
         self.start_month = (
             _normalize_year_month(start_month, "start_month") if start_month else None
         )
         self.end_month = (
             _normalize_year_month(end_month, "end_month") if end_month else None
         )
+        self.locale_start_months = dict(_DEFAULT_LOCALE_START_MONTHS)
+        for locale, month in (locale_start_months or {}).items():
+            self.locale_start_months[locale] = _normalize_year_month(
+                month,
+                f"{locale} start month",
+            )
+        if self.max_months_per_run is not None and self.max_months_per_run < 1:
+            raise ValueError("max_months_per_run must be at least 1")
         if self.start_month and self.end_month and self.start_month > self.end_month:
             raise ValueError("start_month must be before or equal to end_month")
 
@@ -123,13 +136,23 @@ class BandaiScheduleCollector(BaseCollector):
 
         result = result + ja + en + zh
 
-        # Save the current normalized result, including empty lists, so build
-        # never reads stale records from a previous run.
-        self.cache.save_records(result.product_sources, "product_sources.json")
+        product_sources = _merge_raw_product_sources(
+            self.cache.load_records("product_sources.json"),
+            result.product_sources,
+        )
+
+        # Save the accumulated normalized result. This lets large historical
+        # schedule ranges be collected in chunks without overwriting earlier
+        # chunks that are already in the raw cache.
+        self.cache.save_records(product_sources, "product_sources.json")
         self.cache.save_records(result.manuals, "manuals.json")
         self.cache.save_records(result.relationships, "relationships.json")
 
-        return result
+        return CollectionResult(
+            manuals=result.manuals,
+            product_sources=product_sources,
+            relationships=result.relationships,
+        )
 
     def _collect_locale(
         self,
@@ -146,7 +169,7 @@ class BandaiScheduleCollector(BaseCollector):
     def _collect_ja_schedule(self) -> CollectionResult:
         """Collect Japanese schedule across month window."""
         product_sources: list[dict[str, Any]] = []
-        months = self._get_month_window()
+        months = self._get_locale_month_window("ja")
 
         for year_month in months:
             try:
@@ -170,7 +193,7 @@ class BandaiScheduleCollector(BaseCollector):
     def _collect_en_schedule(self) -> CollectionResult:
         """Collect English schedule across month window."""
         product_sources: list[dict[str, Any]] = []
-        months = self._get_month_window()
+        months = self._get_locale_month_window("en")
 
         for year_month in months:
             try:
@@ -194,7 +217,7 @@ class BandaiScheduleCollector(BaseCollector):
     def _collect_zh_schedule(self) -> CollectionResult:
         """Collect Chinese schedule across month window."""
         product_sources: list[dict[str, Any]] = []
-        months = self._get_month_window()
+        months = self._get_locale_month_window("zh-Hans")
 
         for year_month in months:
             try:
@@ -224,7 +247,6 @@ class BandaiScheduleCollector(BaseCollector):
             url,
             page_id,
             headers=_JA_HEADERS,
-            force=True,  # Always fetch schedule pages
         )
 
         if result is None:
@@ -243,7 +265,6 @@ class BandaiScheduleCollector(BaseCollector):
             url,
             page_id,
             headers=_EN_HEADERS,
-            force=True,
         )
 
         if result is None:
@@ -263,7 +284,6 @@ class BandaiScheduleCollector(BaseCollector):
             url,
             page_id,
             headers=_ZH_HEADERS,
-            force=True,
         )
 
         if result is None:
@@ -281,19 +301,24 @@ class BandaiScheduleCollector(BaseCollector):
     ) -> dict[str, Any] | None:
         """Fetch and parse a product detail page.
 
-        Always fetches and re-parses on each run (the HTTP request is always
-        made regardless of cache state). Cache hash is updated for change
-        detection, but detail data is always re-parsed to avoid data loss on
-        incremental collection runs.
+        Reuses the parsed detail cache when available. Product detail taxonomy
+        is stable enough that historical backfills should not re-fetch the same
+        detail page on every chunk.
         """
         url = url_tpl.format(product_id=product_id)
         page_id = f"product-detail-{locale}-{product_id}"
+        detail_filename = f"{page_id}.json"
+        cached_detail = self.cache.load_record(detail_filename)
+        if cached_detail is not None:
+            return cached_detail
 
         try:
             headers = _JA_HEADERS if locale == "ja" else _EN_HEADERS
             result = self.fetch.fetch(url, headers=headers)
             self.cache.put_page(page_id, result.content_hash)
-            return _parse_product_detail(result.text, url, locale, product_id)
+            detail = _parse_product_detail(result.text, url, locale, product_id)
+            self.cache.save_record(detail, detail_filename)
+            return detail
         except Exception as exc:
             logger.warning(
                 "Failed to fetch product detail %s: %s", url, exc,
@@ -303,18 +328,23 @@ class BandaiScheduleCollector(BaseCollector):
     def _fetch_zh_product_detail(self, cn_id: str) -> dict[str, Any] | None:
         """Fetch and parse a Chinese product detail page.
 
-        Always fetches and re-parses on each run (the HTTP request is always
-        made regardless of cache state). Cache hash is updated for change
-        detection, but detail data is always re-parsed to avoid data loss on
-        incremental collection runs.
+        Reuses the parsed detail cache when available. Product detail taxonomy
+        is stable enough that historical backfills should not re-fetch the same
+        detail page on every chunk.
         """
         url = _ZH_PRODUCT_URL.format(cn_id=cn_id)
         page_id = f"zh-product-detail-{cn_id}"
+        detail_filename = f"{page_id}.json"
+        cached_detail = self.cache.load_record(detail_filename)
+        if cached_detail is not None:
+            return cached_detail
 
         try:
             result = self.fetch.fetch(url, headers=_ZH_HEADERS)
             self.cache.put_page(page_id, result.content_hash)
-            return _parse_zh_product_detail(result.text, url, cn_id)
+            detail = _parse_zh_product_detail(result.text, url, cn_id)
+            self.cache.save_record(detail, detail_filename)
+            return detail
         except Exception as exc:
             logger.warning(
                 "Failed to fetch ZH product detail %s: %s", url, exc,
@@ -323,6 +353,18 @@ class BandaiScheduleCollector(BaseCollector):
 
     def _get_month_window(self) -> list[str]:
         """Generate a list of YYYYMM strings for the collection month window."""
+        return self._limit_months_for_run(self._get_unlimited_month_window())
+
+    def _get_locale_month_window(self, locale: str) -> list[str]:
+        """Generate a locale-specific YYYYMM collection window."""
+        months = self._get_unlimited_month_window()
+        start_month = self.locale_start_months.get(locale)
+        if start_month is not None:
+            months = [month for month in months if month >= start_month]
+        return self._limit_months_for_run(months, locale)
+
+    def _get_unlimited_month_window(self) -> list[str]:
+        """Generate a list of YYYYMM strings before chunk limiting."""
         from datetime import date
 
         today = date.today()
@@ -358,6 +400,40 @@ class BandaiScheduleCollector(BaseCollector):
             months.append(f"{y}{m:02d}")
 
         return months
+
+    def _limit_months_for_run(self, months: list[str], locale: str | None = None) -> list[str]:
+        """Limit large explicit ranges to the next missing chunk."""
+        if self.max_months_per_run is None or len(months) <= self.max_months_per_run:
+            return months
+
+        has_cached_month = (
+            self._has_cached_month_records
+            if locale is None
+            else lambda month: self._has_cached_locale_month_records(locale, month)
+        )
+        missing_months = [
+            month
+            for month in months
+            if not has_cached_month(month)
+        ]
+        if missing_months:
+            return missing_months[:self.max_months_per_run]
+
+        # Once the full historical range is cached, revalidate only the newest
+        # chunk. Historical product detail pages are reused from parsed cache.
+        return months[-self.max_months_per_run:]
+
+    def _has_cached_month_records(self, year_month: str) -> bool:
+        """Return whether all locale schedule files exist for a month."""
+        return all(
+            self.cache.has_records(f"{locale}-{year_month}.json")
+            for locale in ("ja", "en", "zh")
+        )
+
+    def _has_cached_locale_month_records(self, locale: str, year_month: str) -> bool:
+        """Return whether a locale schedule file exists for a month."""
+        prefix = _locale_record_prefix(locale)
+        return self.cache.has_records(f"{prefix}-{year_month}.json")
 
 
 def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -398,6 +474,46 @@ def _iter_month_range(start_month: str, end_month: str) -> list[str]:
         months.append(f"{year}{month:02d}")
         year, month = _add_months(year, month, 1)
     return months
+
+
+def _locale_record_prefix(locale: str) -> str:
+    """Return the cache record prefix for a schedule locale."""
+    return _LOCALE_RECORD_PREFIXES[locale]
+
+
+def _merge_raw_product_sources(
+    existing: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge raw product source dicts by their source-local identity."""
+    merged: dict[str, dict[str, Any]] = {}
+    anonymous_count = 0
+
+    for record in [*existing, *current]:
+        key = _raw_product_source_key(record)
+        if key is None:
+            anonymous_count += 1
+            key = f"anonymous:{anonymous_count}"
+        merged[key] = record
+
+    return [merged[key] for key in sorted(merged)]
+
+
+def _raw_product_source_key(record: dict[str, Any]) -> str | None:
+    """Return a stable key for a raw Bandai schedule product source."""
+    source = record.get("source")
+    locale = record.get("locale")
+    source_id = (
+        record.get("product_source_id")
+        or record.get("product_id")
+        or record.get("cn_id")
+    )
+    if not source_id:
+        return None
+    return ":".join(
+        str(part)
+        for part in (source or "bandai_schedule", locale or "", source_id)
+    )
 
 
 # ---- Japanese Schedule Parsing ----

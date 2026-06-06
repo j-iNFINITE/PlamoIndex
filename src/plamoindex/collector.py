@@ -80,6 +80,10 @@ class CollectorCache:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(records, f, indent=2, ensure_ascii=False)
 
+    def has_records(self, filename: str) -> bool:
+        """Return whether a records file exists in this cache."""
+        return (self._records_dir / filename).is_file()
+
     def load_records(self, filename: str) -> list[dict[str, Any]]:
         """Load a list of normalized records from JSON."""
         path = self._records_dir / filename
@@ -87,6 +91,21 @@ class CollectorCache:
             return []
         with open(path, encoding="utf-8") as f:
             return json.load(f)  # type: ignore[no-any-return]
+
+    def save_record(self, record: dict[str, Any], filename: str) -> None:
+        """Save one normalized record as JSON."""
+        path = self._records_dir / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+
+    def load_record(self, filename: str) -> dict[str, Any] | None:
+        """Load one normalized record from JSON."""
+        path = self._records_dir / filename
+        if not path.is_file():
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
 
     def save_raw_page(self, page_id: str, content: str) -> None:
         """Save raw HTML content for debugging."""

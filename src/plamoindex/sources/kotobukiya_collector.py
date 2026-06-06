@@ -187,18 +187,23 @@ class KotobukiyaCollector(BaseCollector):
     def _fetch_detail(self, instruction_id: str) -> dict[str, Any] | None:
         """Fetch and parse an instruction detail page.
 
-        Always fetches and re-parses on each run (the HTTP request is always
-        made regardless of cache state). Cache hash is updated for change
-        detection, but detail data is always re-parsed to avoid data loss on
-        incremental collection runs.
+        Reuses the parsed detail cache when available. List pages are still
+        fetched to discover current instruction IDs, but historical detail
+        pages do not need to be re-fetched on every workflow run.
         """
         url = _DETAIL_URL.format(instruction_id=instruction_id)
         page_id = f"instruction-detail-{instruction_id}"
+        detail_filename = f"{page_id}.json"
+        cached_detail = self.cache.load_record(detail_filename)
+        if cached_detail is not None:
+            return cached_detail
 
         try:
             result = self.fetch.fetch(url)
             self.cache.put_page(page_id, result.content_hash)
-            return _parse_instruction_detail(result.text, url, instruction_id)
+            detail = _parse_instruction_detail(result.text, url, instruction_id)
+            self.cache.save_record(detail, detail_filename)
+            return detail
         except Exception as exc:
             logger.warning(
                 "Failed to fetch instruction detail %s: %s", instruction_id, exc,
@@ -208,18 +213,23 @@ class KotobukiyaCollector(BaseCollector):
     def _fetch_product_detail(self, product_id: str) -> dict[str, Any] | None:
         """Fetch and parse a product detail page.
 
-        Always fetches and re-parses on each run (the HTTP request is always
-        made regardless of cache state). Cache hash is updated for change
-        detection, but detail data is always re-parsed to avoid data loss on
-        incremental collection runs.
+        Reuses the parsed detail cache when available. Product metadata is
+        stable enough that historical workflow chunks should not fetch the same
+        product detail page repeatedly.
         """
         url = _PRODUCT_URL.format(product_id=product_id)
         page_id = f"product-detail-{product_id}"
+        detail_filename = f"{page_id}.json"
+        cached_detail = self.cache.load_record(detail_filename)
+        if cached_detail is not None:
+            return cached_detail
 
         try:
             result = self.fetch.fetch(url)
             self.cache.put_page(page_id, result.content_hash)
-            return _parse_product_detail(result.text, url, product_id)
+            detail = _parse_product_detail(result.text, url, product_id)
+            self.cache.save_record(detail, detail_filename)
+            return detail
         except Exception as exc:
             logger.warning(
                 "Failed to fetch product detail %s: %s", product_id, exc,

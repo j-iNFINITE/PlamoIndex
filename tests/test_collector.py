@@ -106,8 +106,19 @@ class TestCollectorCache:
         cache = CollectorCache(tmp_path, "test")
         records = [{"id": "1", "value": "test"}]
         cache.save_records(records, "test_records.json")
+        assert cache.has_records("test_records.json") is True
         loaded = cache.load_records("test_records.json")
         assert loaded == records
+        cache.close()
+
+    def test_save_load_single_record(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "test")
+        record = {"id": "1", "value": "test"}
+
+        cache.save_record(record, "detail-1.json")
+
+        assert cache.load_record("detail-1.json") == record
+        assert cache.load_record("missing.json") is None
         cache.close()
 
     def test_load_nonexistent_records(self, tmp_path: Path) -> None:
@@ -187,6 +198,151 @@ class TestBandaiScheduleWindow:
         assert collector._get_month_window() == ["198007", "198008", "198009"]
         collector.close()
 
+    def test_explicit_month_range_can_be_limited_to_next_missing_chunk(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        for locale in ("ja", "en", "zh"):
+            cache.save_records([], f"{locale}-198007.json")
+        collector = BandaiScheduleCollector(
+            _NoopFetch(),  # type: ignore[arg-type]
+            cache,
+            start_month="198007",
+            end_month="198010",
+            max_months_per_run=2,
+        )
+
+        assert collector._get_month_window() == ["198008", "198009"]
+        collector.close()
+
+    def test_limited_month_range_revalidates_newest_chunk_when_complete(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        for month in ("198007", "198008", "198009", "198010"):
+            for locale in ("ja", "en", "zh"):
+                cache.save_records([], f"{locale}-{month}.json")
+        collector = BandaiScheduleCollector(
+            _NoopFetch(),  # type: ignore[arg-type]
+            cache,
+            start_month="198007",
+            end_month="198010",
+            max_months_per_run=2,
+        )
+
+        assert collector._get_month_window() == ["198009", "198010"]
+        collector.close()
+
+    def test_locale_month_window_uses_locale_specific_cache(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        cache.save_records([], "ja-198007.json")
+        collector = BandaiScheduleCollector(
+            _NoopFetch(),  # type: ignore[arg-type]
+            cache,
+            start_month="198007",
+            end_month="198010",
+            max_months_per_run=2,
+        )
+
+        assert collector._get_locale_month_window("ja") == ["198008", "198009"]
+        assert collector._get_locale_month_window("en") == ["198007", "198008"]
+        collector.close()
+
+    def test_zh_locale_window_skips_months_before_default_site_start(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        collector = BandaiScheduleCollector(
+            _NoopFetch(),  # type: ignore[arg-type]
+            cache,
+            start_month="198007",
+            end_month="198912",
+            max_months_per_run=6,
+        )
+
+        assert collector._get_locale_month_window("zh-Hans") == [
+            "198909",
+            "198910",
+            "198911",
+            "198912",
+        ]
+        collector.close()
+
+    def test_locale_start_month_can_be_overridden(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        collector = BandaiScheduleCollector(
+            _NoopFetch(),  # type: ignore[arg-type]
+            cache,
+            start_month="198007",
+            end_month="198912",
+            max_months_per_run=3,
+            locale_start_months={"zh-Hans": "1988-01"},
+        )
+
+        assert collector._get_locale_month_window("zh-Hans") == [
+            "198801",
+            "198802",
+            "198803",
+        ]
+        collector.close()
+
+    def test_collect_all_merges_schedule_product_sources_with_existing_cache(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        cache.save_records(
+            [
+                {
+                    "source": "bandai_schedule_ja",
+                    "locale": "ja",
+                    "product_id": "01_0001",
+                    "title": "Existing",
+                }
+            ],
+            "product_sources.json",
+        )
+        collector = BandaiScheduleCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            collector,
+            "_collect_ja_schedule",
+            lambda: CollectionResult(
+                product_sources=[
+                    {
+                        "source": "bandai_schedule_ja",
+                        "locale": "ja",
+                        "product_id": "01_0002",
+                        "title": "Current",
+                    }
+                ],
+            ),
+        )
+        monkeypatch.setattr(collector, "_collect_en_schedule", lambda: CollectionResult())
+        monkeypatch.setattr(collector, "_collect_zh_schedule", lambda: CollectionResult())
+
+        result = collector.collect_all()
+
+        assert {
+            record["product_id"]
+            for record in result.product_sources
+        } == {"01_0001", "01_0002"}
+        assert {
+            record["product_id"]
+            for record in cache.load_records("product_sources.json")
+        } == {"01_0001", "01_0002"}
+        collector.close()
+
+    def test_bandai_schedule_detail_uses_cached_record_without_fetch(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        cached_detail = {"taxonomy": [{"kind": "brand", "label": "HG"}]}
+        cache.save_record(cached_detail, "product-detail-ja-01_0001.json")
+        collector = BandaiScheduleCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+
+        detail = collector._fetch_product_detail(
+            "01_0001",
+            "https://bandai-hobby.net/item/{product_id}/",
+            "ja",
+        )
+
+        assert detail == cached_detail
+        collector.close()
+
     def test_zh_month_fetch_uses_hyphenated_month_url(self, tmp_path: Path) -> None:
         html = """
         <a class="c-card p-card -landscape" href="/index/index/detail/id/42">
@@ -214,7 +370,11 @@ class TestBandaiScheduleWindow:
         collector = BandaiScheduleCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
         months_seen: list[str] = []
 
-        monkeypatch.setattr(collector, "_get_month_window", lambda: ["198909", "198910"])
+        monkeypatch.setattr(
+            collector,
+            "_get_locale_month_window",
+            lambda locale: ["198909", "198910"],
+        )
 
         def fetch_zh_month(year_month: str) -> list[dict[str, str]]:
             months_seen.append(year_month)
@@ -241,6 +401,39 @@ class TestBandaiScheduleWindow:
 
 
 class TestKotobukiyaCollectorRelationships:
+    def test_bandai_manual_detail_uses_cached_record_without_fetch(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_manual")
+        cached_detail = {"product_code": "5061234"}
+        cache.save_record(cached_detail, "detail-5119.json")
+        collector = BandaiManualCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+
+        detail = collector._fetch_detail("5119")
+
+        assert detail == cached_detail
+        collector.close()
+
+    def test_kotobukiya_instruction_detail_uses_cached_record_without_fetch(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "kotobukiya")
+        cached_detail = {"product_link": "https://www.kotobukiya.co.jp/en/product/detail/p1/"}
+        cache.save_record(cached_detail, "instruction-detail-538.json")
+        collector = KotobukiyaCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+
+        detail = collector._fetch_detail("538")
+
+        assert detail == cached_detail
+        collector.close()
+
+    def test_kotobukiya_product_detail_uses_cached_record_without_fetch(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "kotobukiya")
+        cached_detail = {"title": "Cached Product"}
+        cache.save_record(cached_detail, "product-detail-p1.json")
+        collector = KotobukiyaCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+
+        detail = collector._fetch_product_detail("p1")
+
+        assert detail == cached_detail
+        collector.close()
+
     def test_duplicate_product_sources_are_saved_once(
         self,
         tmp_path: Path,

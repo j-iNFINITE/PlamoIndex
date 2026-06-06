@@ -153,6 +153,27 @@ class BandaiSource(SourcePlugin):
         if end_month is not None:
             collector_kwargs["end_month"] = end_month
 
+        max_months_per_run = _source_int_option(
+            source_cfg,
+            "schedule_max_months_per_run",
+            "max_months_per_run",
+        )
+        if max_months_per_run is not None:
+            collector_kwargs["max_months_per_run"] = max_months_per_run
+
+        locale_start_months: dict[str, str] = {}
+        locale_start_config = (
+            ("ja", "schedule_ja_start_month"),
+            ("en", "schedule_en_start_month"),
+            ("zh-Hans", "schedule_zh_start_month"),
+        )
+        for locale, key in locale_start_config:
+            value = _source_str_option(source_cfg, key)
+            if value is not None:
+                locale_start_months[locale] = value
+        if locale_start_months:
+            collector_kwargs["locale_start_months"] = locale_start_months
+
         collector = BandaiScheduleCollector(fetch_client, cache, **collector_kwargs)
 
         try:

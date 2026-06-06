@@ -11,6 +11,11 @@ on:
         description: "Optional Bandai schedule backfill end month, e.g. 202612"
         required: false
         type: string
+      bandai_schedule_max_months_per_run:
+        description: "Optional Bandai schedule backfill chunk size, default 36 months"
+        required: false
+        default: "36"
+        type: string
   schedule:
     # Run daily at 06:00 UTC
     - cron: "0 6 * * *"
@@ -54,6 +59,7 @@ jobs:
       env:
         BANDAI_SCHEDULE_START_MONTH: ${{ github.event.inputs.bandai_schedule_start_month || '' }}
         BANDAI_SCHEDULE_END_MONTH: ${{ github.event.inputs.bandai_schedule_end_month || '' }}
+        BANDAI_SCHEDULE_MAX_MONTHS_PER_RUN: ${{ github.event.inputs.bandai_schedule_max_months_per_run || '' }}
       run: |
         python - <<'PY'
         from pathlib import Path
@@ -69,10 +75,17 @@ jobs:
         bandai_cfg = config.setdefault("sources", {}).setdefault("bandai", {})
         start_month = os.environ.get("BANDAI_SCHEDULE_START_MONTH", "").strip()
         end_month = os.environ.get("BANDAI_SCHEDULE_END_MONTH", "").strip()
+        max_months = os.environ.get("BANDAI_SCHEDULE_MAX_MONTHS_PER_RUN", "").strip()
         if start_month:
             bandai_cfg["schedule_start_month"] = start_month
         if end_month:
             bandai_cfg["schedule_end_month"] = end_month
+        if start_month or end_month:
+            max_months = max_months or "36"
+            max_months_per_run = int(max_months)
+            if max_months_per_run < 1:
+                raise ValueError("bandai_schedule_max_months_per_run must be at least 1")
+            bandai_cfg["schedule_max_months_per_run"] = max_months_per_run
 
         target = Path("plamoindex.github.yml")
         target.write_text(
@@ -85,6 +98,7 @@ jobs:
                 "bandai schedule range="
                 f"{bandai_cfg.get('schedule_start_month', '<rolling-start>')}.."
                 f"{bandai_cfg.get('schedule_end_month', '<rolling-end>')}"
+                f", max_months_per_run={bandai_cfg.get('schedule_max_months_per_run', '<none>')}"
             )
         PY
 
