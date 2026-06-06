@@ -85,15 +85,17 @@ class KotobukiyaSource(SourcePlugin):
 
         try:
             result = collector.collect_all()
+            product_sources = _dedupe_product_source_dicts(result.product_sources)
+            relationships = _dedupe_relationship_dicts(result.relationships)
             self._collection = SourceCollection(
                 manuals=[_manual_dict_to_record(m) for m in result.manuals],
                 product_sources=[
                     _product_source_dict_to_record(ps)
-                    for ps in result.product_sources
+                    for ps in product_sources
                 ],
                 relationships=[
                     _relationship_dict_to_record(r)
-                    for r in result.relationships
+                    for r in relationships
                 ],
             )
             return self._collection
@@ -104,6 +106,12 @@ class KotobukiyaSource(SourcePlugin):
         """Load Kotobukiya records from the raw collection cache."""
         cache = CollectorCache(raw_dir, "kotobukiya")
         try:
+            product_sources = _dedupe_product_source_dicts(
+                cache.load_records("product_sources.json")
+            )
+            relationships = _dedupe_relationship_dicts(
+                cache.load_records("relationships.json")
+            )
             return SourceCollection(
                 manuals=[
                     _manual_dict_to_record(m)
@@ -111,15 +119,40 @@ class KotobukiyaSource(SourcePlugin):
                 ],
                 product_sources=[
                     _product_source_dict_to_record(ps)
-                    for ps in cache.load_records("product_sources.json")
+                    for ps in product_sources
                 ],
                 relationships=[
                     _relationship_dict_to_record(r)
-                    for r in cache.load_records("relationships.json")
+                    for r in relationships
                 ],
             )
         finally:
             cache.close()
+
+
+def _dedupe_product_source_dicts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one Kotobukiya product source record per product source key."""
+    deduped: dict[str, dict[str, Any]] = {}
+    for index, record in enumerate(records):
+        key = record.get("product_source_key")
+        if not key:
+            product_id = record.get("product_source_id") or record.get("product_id")
+            key = f"kotobukiya-product:en:{product_id}" if product_id else f"missing:{index}"
+        deduped.setdefault(str(key), record)
+    return list(deduped.values())
+
+
+def _dedupe_relationship_dicts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one Kotobukiya relationship record per from/to/type tuple."""
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for record in records:
+        key = (
+            str(record.get("from_key", "")),
+            str(record.get("to_key", "")),
+            str(record.get("relationship", "manual_for_product")),
+        )
+        deduped.setdefault(key, record)
+    return list(deduped.values())
 
 
 def _manual_dict_to_record(d: dict[str, Any]) -> ManualRecord:

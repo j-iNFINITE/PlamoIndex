@@ -10,6 +10,8 @@ sources:
   bandai:
     enabled: true
     delay_seconds: 1.0
+    schedule_past_months: 3
+    schedule_future_months: 6
   kotobukiya:
     enabled: true
     delay_seconds: 1.0

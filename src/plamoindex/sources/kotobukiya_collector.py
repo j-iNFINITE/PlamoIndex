@@ -65,8 +65,9 @@ class KotobukiyaCollector(BaseCollector):
     def collect_all(self) -> CollectionResult:
         """Full collection pass: instruction list -> detail -> product detail."""
         manuals: list[dict[str, Any]] = []
-        product_sources: list[dict[str, Any]] = []
+        product_sources_by_key: dict[str, dict[str, Any]] = {}
         relationships: list[dict[str, Any]] = []
+        relationship_keys: set[tuple[str, str, str]] = set()
 
         # Step 1: Discover instruction entries from list pages
         list_entries = self._collect_list_pages()
@@ -86,28 +87,52 @@ class KotobukiyaCollector(BaseCollector):
                     product_id_match = re.search(r"/product/detail/([\w]+)", product_link)
                     if product_id_match:
                         product_id = product_id_match.group(1)
-                        product_detail = self._fetch_product_detail(product_id)
-                        if product_detail:
-                            product_source = self._build_product_source(
-                                product_id, product_detail,
+                        product_source_key = f"kotobukiya-product:en:{product_id}"
+                        product_key = f"kotobukiya-product:{product_id}"
+
+                        if product_source_key not in product_sources_by_key:
+                            product_detail = self._fetch_product_detail(product_id)
+                            product_source = (
+                                self._build_product_source(product_id, product_detail)
+                                if product_detail
+                                else None
                             )
                             if product_source:
-                                product_sources.append(product_source)
+                                actual_key = str(
+                                    product_source.get("product_source_key") or product_source_key
+                                )
+                                product_sources_by_key[actual_key] = product_source
+                            else:
+                                logger.warning(
+                                    "Skipping relationship for instruction %s because "
+                                    "product source %s could not be built",
+                                    instruction_id,
+                                    product_source_key,
+                                )
 
-                            # Create confirmed relationship
-                            relationships.append({
-                                "from_key": f"kotobukiya:{instruction_id}",
-                                "to_key": f"kotobukiya-product:{product_id}",
-                                "relationship": "manual_for_product",
-                                "status": "confirmed",
-                                "method": "official_instruction_detail_product_link",
-                                "confidence": 1.0,
-                                "provenance": {
-                                    "collector": "kotobukiya",
-                                    "collection_method": "scrape",
-                                    "collected_at": datetime.now(timezone.utc).isoformat(),
-                                },
-                            })
+                        # Create confirmed relationship only when the target
+                        # product source exists and can be merged into a product.
+                        if product_source_key in product_sources_by_key:
+                            relationship_identity = (
+                                f"kotobukiya:{instruction_id}",
+                                product_key,
+                                "manual_for_product",
+                            )
+                            if relationship_identity not in relationship_keys:
+                                relationship_keys.add(relationship_identity)
+                                relationships.append({
+                                    "from_key": relationship_identity[0],
+                                    "to_key": relationship_identity[1],
+                                    "relationship": "manual_for_product",
+                                    "status": "confirmed",
+                                    "method": "official_instruction_detail_product_link",
+                                    "confidence": 1.0,
+                                    "provenance": {
+                                        "collector": "kotobukiya",
+                                        "collection_method": "scrape",
+                                        "collected_at": datetime.now(timezone.utc).isoformat(),
+                                    },
+                                })
 
                 manuals.append(entry)
             except Exception as exc:
@@ -117,6 +142,7 @@ class KotobukiyaCollector(BaseCollector):
                 manuals.append(entry)
 
         # Save to cache
+        product_sources = list(product_sources_by_key.values())
         self.cache.save_records(manuals, "manuals.json")
         self.cache.save_records(product_sources, "product_sources.json")
         self.cache.save_records(relationships, "relationships.json")

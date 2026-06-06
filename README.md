@@ -99,6 +99,18 @@ dataset:
   base_url: "https://<owner>.github.io/<repo>"
 ```
 
+Manual `Dataset Build` runs can also set Bandai schedule backfill inputs:
+
+```text
+bandai_schedule_start_month = 198007
+bandai_schedule_end_month   = 202612
+```
+
+The same configured month window is applied to the Japanese, English, and
+Chinese Bandai schedule pages. When these inputs are omitted, the scheduled
+workflow uses the normal rolling Bandai schedule window instead of crawling the
+full historical archive.
+
 The generated dataset will be available at:
 
 ```text
@@ -124,6 +136,11 @@ sources:
   bandai:
     enabled: true
     delay_seconds: 1.0
+    schedule_past_months: 3
+    schedule_future_months: 6
+    # Optional historical backfill range. Omit these for the rolling window.
+    # schedule_start_month: "198007"
+    # schedule_end_month: "202612"
   kotobukiya:
     enabled: true
     delay_seconds: 1.0
@@ -137,6 +154,11 @@ output:
 dataset:
   base_url: "https://manuals.example.com"
 ```
+
+Collection status counts are record counts, not crawled page counts. For
+example, `bandai.product_sources: 363` means 363 Bandai product-source records
+were collected from the configured schedule window; it does not mean 363
+schedule pages were crawled.
 
 ## Output Files
 

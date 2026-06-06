@@ -2,7 +2,15 @@ name: Dataset Build
 
 on:
   workflow_dispatch:
-    # Allow manual trigger
+    inputs:
+      bandai_schedule_start_month:
+        description: "Optional Bandai schedule backfill start month, e.g. 198007"
+        required: false
+        type: string
+      bandai_schedule_end_month:
+        description: "Optional Bandai schedule backfill end month, e.g. 202612"
+        required: false
+        type: string
   schedule:
     # Run daily at 06:00 UTC
     - cron: "0 6 * * *"
@@ -19,7 +27,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     steps:
     - uses: actions/checkout@v4
@@ -43,6 +51,9 @@ jobs:
           raw-cache-${{ runner.os }}-
 
     - name: Prepare GitHub Pages config
+      env:
+        BANDAI_SCHEDULE_START_MONTH: ${{ github.event.inputs.bandai_schedule_start_month || '' }}
+        BANDAI_SCHEDULE_END_MONTH: ${{ github.event.inputs.bandai_schedule_end_month || '' }}
       run: |
         python - <<'PY'
         from pathlib import Path
@@ -55,12 +66,26 @@ jobs:
         repo = os.environ["GITHUB_REPOSITORY"].split("/", 1)[1]
         config.setdefault("dataset", {})["base_url"] = f"https://{owner}.github.io/{repo}"
 
+        bandai_cfg = config.setdefault("sources", {}).setdefault("bandai", {})
+        start_month = os.environ.get("BANDAI_SCHEDULE_START_MONTH", "").strip()
+        end_month = os.environ.get("BANDAI_SCHEDULE_END_MONTH", "").strip()
+        if start_month:
+            bandai_cfg["schedule_start_month"] = start_month
+        if end_month:
+            bandai_cfg["schedule_end_month"] = end_month
+
         target = Path("plamoindex.github.yml")
         target.write_text(
             yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
             encoding="utf-8",
         )
         print(f"dataset.base_url={config['dataset']['base_url']}")
+        if start_month or end_month:
+            print(
+                "bandai schedule range="
+                f"{bandai_cfg.get('schedule_start_month', '<rolling-start>')}.."
+                f"{bandai_cfg.get('schedule_end_month', '<rolling-end>')}"
+            )
         PY
 
     - name: Validate curated data

@@ -126,7 +126,34 @@ class BandaiSource(SourcePlugin):
 
         fetch_client = FetchClient(config)
         cache = CollectorCache(raw_dir, "bandai_schedule")
-        collector = BandaiScheduleCollector(fetch_client, cache)
+        source_cfg = config.sources.get("bandai", {})
+        collector_kwargs: dict[str, Any] = {}
+
+        past_months = _source_int_option(
+            source_cfg,
+            "schedule_past_months",
+            "past_months",
+        )
+        if past_months is not None:
+            collector_kwargs["past_months"] = past_months
+
+        future_months = _source_int_option(
+            source_cfg,
+            "schedule_future_months",
+            "future_months",
+        )
+        if future_months is not None:
+            collector_kwargs["future_months"] = future_months
+
+        start_month = _source_str_option(source_cfg, "schedule_start_month")
+        if start_month is not None:
+            collector_kwargs["start_month"] = start_month
+
+        end_month = _source_str_option(source_cfg, "schedule_end_month")
+        if end_month is not None:
+            collector_kwargs["end_month"] = end_month
+
+        collector = BandaiScheduleCollector(fetch_client, cache, **collector_kwargs)
 
         try:
             result = collector.collect_all()
@@ -293,3 +320,20 @@ def _normalize_title(title: str) -> str | None:
         return None
     return "".join(title.split()).lower()
 
+
+def _source_int_option(source_cfg: dict[str, Any], *keys: str) -> int | None:
+    """Read the first configured integer source option from a source config."""
+    for key in keys:
+        value = source_cfg.get(key)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _source_str_option(source_cfg: dict[str, Any], key: str) -> str | None:
+    """Read a non-empty string source option from a source config."""
+    value = source_cfg.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

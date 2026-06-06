@@ -33,7 +33,7 @@ _EN_SCHEDULE_URL = "https://global.bandai-hobby.net/en-others/schedule/index.php
 _EN_PRODUCT_URL = "https://global.bandai-hobby.net/en-others/item/{product_id}/"
 
 # Chinese schedule
-_ZH_SCHEDULE_URL = "https://bandaihobbysite.cn/schedule"
+_ZH_SCHEDULE_URL = "https://bandaihobbysite.cn/index/index/schedule/month/{year_month}"
 _ZH_PRODUCT_URL = "https://bandaihobbysite.cn/index/index/detail/id/{cn_id}"
 
 # Default month window for collection
@@ -97,10 +97,20 @@ class BandaiScheduleCollector(BaseCollector):
         *,
         past_months: int = _DEFAULT_PAST_MONTHS,
         future_months: int = _DEFAULT_FUTURE_MONTHS,
+        start_month: str | None = None,
+        end_month: str | None = None,
     ) -> None:
         super().__init__(fetch_client, cache)
         self.past_months = past_months
         self.future_months = future_months
+        self.start_month = (
+            _normalize_year_month(start_month, "start_month") if start_month else None
+        )
+        self.end_month = (
+            _normalize_year_month(end_month, "end_month") if end_month else None
+        )
+        if self.start_month and self.end_month and self.start_month > self.end_month:
+            raise ValueError("start_month must be before or equal to end_month")
 
     def collect_all(self) -> CollectionResult:
         """Full collection pass across all three locales."""
@@ -182,19 +192,23 @@ class BandaiScheduleCollector(BaseCollector):
         return CollectionResult(product_sources=product_sources)
 
     def _collect_zh_schedule(self) -> CollectionResult:
-        """Collect Chinese schedule."""
+        """Collect Chinese schedule across month window."""
         product_sources: list[dict[str, Any]] = []
+        months = self._get_month_window()
 
-        try:
-            entries = self._fetch_zh_schedule()
-            for entry in entries:
-                cn_id = entry["cn_id"]
-                detail = self._fetch_zh_product_detail(cn_id)
-                if detail:
-                    entry.update(detail)
-                product_sources.append(entry)
-        except Exception as exc:
-            logger.warning("Failed to collect ZH schedule: %s", exc)
+        for year_month in months:
+            try:
+                entries = self._fetch_zh_month(year_month)
+                for entry in entries:
+                    cn_id = entry["cn_id"]
+                    detail = self._fetch_zh_product_detail(cn_id)
+                    if detail:
+                        entry.update(detail)
+                    product_sources.append(entry)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to collect ZH schedule for %s: %s", year_month, exc,
+                )
 
         return CollectionResult(product_sources=product_sources)
 
@@ -239,10 +253,11 @@ class BandaiScheduleCollector(BaseCollector):
         self.cache.save_records(entries, f"en-{year_month}.json")
         return entries
 
-    def _fetch_zh_schedule(self) -> list[dict[str, Any]]:
-        """Fetch and parse the Chinese schedule page."""
-        url = _ZH_SCHEDULE_URL
-        page_id = "zh-schedule"
+    def _fetch_zh_month(self, year_month: str) -> list[dict[str, Any]]:
+        """Fetch and parse a Chinese schedule month page."""
+        hyphenated_month = _hyphenated_year_month(year_month)
+        url = _ZH_SCHEDULE_URL.format(year_month=hyphenated_month)
+        page_id = f"zh-schedule-{year_month}"
 
         result = self.fetch_with_cache(
             url,
@@ -252,10 +267,10 @@ class BandaiScheduleCollector(BaseCollector):
         )
 
         if result is None:
-            return self.cache.load_records("zh-schedule.json")
+            return self.cache.load_records(f"zh-{year_month}.json")
 
-        entries = _parse_zh_schedule_page(result.text)
-        self.cache.save_records(entries, "zh-schedule.json")
+        entries = _parse_zh_schedule_page(result.text, year_month)
+        self.cache.save_records(entries, f"zh-{year_month}.json")
         return entries
 
     def _fetch_product_detail(
@@ -311,6 +326,22 @@ class BandaiScheduleCollector(BaseCollector):
         from datetime import date
 
         today = date.today()
+
+        if self.start_month or self.end_month:
+            if self.start_month:
+                start = self.start_month
+            else:
+                y, m = _add_months(today.year, today.month, -self.past_months)
+                start = f"{y}{m:02d}"
+
+            if self.end_month:
+                end = self.end_month
+            else:
+                y, m = _add_months(today.year, today.month, self.future_months)
+                end = f"{y}{m:02d}"
+
+            return _iter_month_range(start, end)
+
         months: list[str] = []
 
         # Past months
@@ -333,6 +364,40 @@ def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
     """Add or subtract months from a year/month pair."""
     total_months = (year * 12 + month - 1) + delta
     return (total_months // 12, total_months % 12 + 1)
+
+
+def _normalize_year_month(value: str, field_name: str) -> str:
+    """Normalize a YYYYMM or YYYY-MM month string to YYYYMM."""
+    match = re.fullmatch(r"(\d{4})-?(\d{2})", value.strip())
+    if not match:
+        raise ValueError(f"{field_name} must be in YYYYMM or YYYY-MM format")
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if month < 1 or month > 12:
+        raise ValueError(f"{field_name} month must be between 01 and 12")
+    return f"{year}{month:02d}"
+
+
+def _hyphenated_year_month(value: str) -> str:
+    """Format a YYYYMM or YYYY-MM month string as YYYY-MM for Chinese URLs."""
+    year_month = _normalize_year_month(value, "year_month")
+    return f"{year_month[:4]}-{year_month[4:]}"
+
+
+def _iter_month_range(start_month: str, end_month: str) -> list[str]:
+    """Generate inclusive YYYYMM strings from start_month to end_month."""
+    start_year = int(start_month[:4])
+    start_month_num = int(start_month[4:])
+    end_year = int(end_month[:4])
+    end_month_num = int(end_month[4:])
+
+    months: list[str] = []
+    year = start_year
+    month = start_month_num
+    while (year, month) <= (end_year, end_month_num):
+        months.append(f"{year}{month:02d}")
+        year, month = _add_months(year, month, 1)
+    return months
 
 
 # ---- Japanese Schedule Parsing ----
@@ -562,7 +627,7 @@ def _parse_en_release_month(text: str) -> str | None:
 
 # ---- Chinese Schedule Parsing ----
 
-def _parse_zh_schedule_page(html: str) -> list[dict[str, Any]]:
+def _parse_zh_schedule_page(html: str, year_month: str | None = None) -> list[dict[str, Any]]:
     """Parse the Chinese schedule page.
 
     Expected structure (from research):
@@ -575,14 +640,14 @@ def _parse_zh_schedule_page(html: str) -> list[dict[str, Any]]:
     if not items:
         items = soup.select(".card, [class*='card'], .product-item, li")
     for item in items:
-        entry = _parse_zh_card(item)
+        entry = _parse_zh_card(item, year_month)
         if entry:
             entries.append(entry)
 
     return entries
 
 
-def _parse_zh_card(item: Tag) -> dict[str, Any] | None:
+def _parse_zh_card(item: Tag, year_month: str | None = None) -> dict[str, Any] | None:
     """Parse a single Chinese schedule card."""
     link: Tag | None
     if item.name == "a" and re.search(r"/index/index/detail/id/\d+", _get_attr_str(item, "href")):
@@ -634,6 +699,9 @@ def _parse_zh_card(item: Tag) -> dict[str, Any] | None:
     release_elem = item.select_one(".p-card_date")
     release_raw = _clean_text(release_elem.get_text(" ", strip=True)) if release_elem else item.get_text()
     release_month = _parse_zh_release_month(release_raw)
+    if not release_month and year_month:
+        normalized_month = _normalize_year_month(year_month, "year_month")
+        release_month = f"{normalized_month[:4]}-{normalized_month[4:]}"
 
     entry: dict[str, Any] = {
         "cn_id": cn_id,

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from plamoindex.collector import CollectionResult, CollectorCache
 from plamoindex.fetch import FetchResult
 from plamoindex.sources.bandai_manual import BandaiManualCollector
 from plamoindex.sources.bandai_manual import _parse_list_page as parse_bandai_manual_list
 from plamoindex.sources.bandai_schedule import (
+    BandaiScheduleCollector,
     _parse_en_schedule_page,
     _parse_ja_schedule_page,
     _parse_zh_schedule_page,
@@ -16,7 +19,9 @@ from plamoindex.sources.bandai_schedule import (
 from plamoindex.sources.bandai_schedule import (
     _parse_product_detail as parse_bandai_product_detail,
 )
+from plamoindex.sources.kotobukiya import KotobukiyaSource
 from plamoindex.sources.kotobukiya_collector import (
+    KotobukiyaCollector,
     _parse_instruction_detail,
     _parse_instruction_list,
 )
@@ -38,6 +43,34 @@ class _RepeatingFetch:
             headers={},
             text=self.html,
             content_hash=f"hash-{self.calls}",
+            elapsed=0,
+        )
+
+    def close(self) -> None:
+        pass
+
+
+class _NoopFetch:
+    def fetch(self, url: str, headers: dict[str, str] | None = None) -> FetchResult:
+        raise AssertionError(f"Unexpected fetch call: {url}")
+
+    def close(self) -> None:
+        pass
+
+
+class _RecordingFetch:
+    def __init__(self, html: str) -> None:
+        self.html = html
+        self.urls: list[str] = []
+
+    def fetch(self, url: str, headers: dict[str, str] | None = None) -> FetchResult:
+        self.urls.append(url)
+        return FetchResult(
+            url=url,
+            status_code=200,
+            headers={},
+            text=self.html,
+            content_hash=f"hash-{len(self.urls)}",
             elapsed=0,
         )
 
@@ -139,6 +172,199 @@ class TestBandaiManualPagination:
         assert len(entries) == 1
         assert entries[0]["manual_id"] == "1"
         collector.close()
+
+
+class TestBandaiScheduleWindow:
+    def test_explicit_month_range_overrides_rolling_window(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        collector = BandaiScheduleCollector(
+            _NoopFetch(),  # type: ignore[arg-type]
+            cache,
+            start_month="198007",
+            end_month="198009",
+        )
+
+        assert collector._get_month_window() == ["198007", "198008", "198009"]
+        collector.close()
+
+    def test_zh_month_fetch_uses_hyphenated_month_url(self, tmp_path: Path) -> None:
+        html = """
+        <a class="c-card p-card -landscape" href="/index/index/detail/id/42">
+          <div class="p-card__tit">测试商品</div>
+        </a>
+        """
+        fetch = _RecordingFetch(html)
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        collector = BandaiScheduleCollector(fetch, cache)  # type: ignore[arg-type]
+
+        entries = collector._fetch_zh_month("198909")
+
+        assert fetch.urls == [
+            "https://bandaihobbysite.cn/index/index/schedule/month/1989-09"
+        ]
+        assert entries[0]["release_month"] == "1989-09"
+        collector.close()
+
+    def test_zh_schedule_collects_the_configured_month_window(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = CollectorCache(tmp_path, "bandai_schedule")
+        collector = BandaiScheduleCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+        months_seen: list[str] = []
+
+        monkeypatch.setattr(collector, "_get_month_window", lambda: ["198909", "198910"])
+
+        def fetch_zh_month(year_month: str) -> list[dict[str, str]]:
+            months_seen.append(year_month)
+            return [
+                {
+                    "cn_id": year_month,
+                    "product_source_id": year_month,
+                    "locale": "zh-Hans",
+                    "title": f"ZH {year_month}",
+                }
+            ]
+
+        monkeypatch.setattr(collector, "_fetch_zh_month", fetch_zh_month)
+        monkeypatch.setattr(collector, "_fetch_zh_product_detail", lambda cn_id: None)
+
+        result = collector._collect_zh_schedule()
+
+        assert months_seen == ["198909", "198910"]
+        assert [entry["cn_id"] for entry in result.product_sources] == [
+            "198909",
+            "198910",
+        ]
+        collector.close()
+
+
+class TestKotobukiyaCollectorRelationships:
+    def test_duplicate_product_sources_are_saved_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = CollectorCache(tmp_path, "kotobukiya")
+        collector = KotobukiyaCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+        product_link = "https://www.kotobukiya.co.jp/en/product/detail/p4934054083237/"
+        fetch_calls: list[str] = []
+
+        monkeypatch.setattr(
+            collector,
+            "_collect_list_pages",
+            lambda: [
+                {"instruction_id": "538", "title": "Manual 1", "product_link": product_link},
+                {"instruction_id": "228", "title": "Manual 2", "product_link": product_link},
+            ],
+        )
+        monkeypatch.setattr(collector, "_fetch_detail", lambda instruction_id: {})
+
+        def fetch_product_detail(product_id: str) -> dict[str, str]:
+            fetch_calls.append(product_id)
+            return {"title": "Shared Product"}
+
+        monkeypatch.setattr(collector, "_fetch_product_detail", fetch_product_detail)
+
+        result = collector.collect_all()
+
+        assert fetch_calls == ["p4934054083237"]
+        assert [p["product_source_key"] for p in result.product_sources] == [
+            "kotobukiya-product:en:p4934054083237"
+        ]
+        assert [r["from_key"] for r in result.relationships] == [
+            "kotobukiya:538",
+            "kotobukiya:228",
+        ]
+        assert {r["to_key"] for r in result.relationships} == {
+            "kotobukiya-product:p4934054083237"
+        }
+        collector.close()
+
+    def test_relationship_is_not_emitted_when_product_source_cannot_be_built(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = CollectorCache(tmp_path, "kotobukiya")
+        collector = KotobukiyaCollector(_NoopFetch(), cache)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            collector,
+            "_collect_list_pages",
+            lambda: [
+                {
+                    "instruction_id": "291",
+                    "title": "Manual",
+                    "product_link": "https://www.kotobukiya.co.jp/en/product/detail/p4934054261000/",
+                }
+            ],
+        )
+        monkeypatch.setattr(collector, "_fetch_detail", lambda instruction_id: {})
+        monkeypatch.setattr(
+            collector,
+            "_fetch_product_detail",
+            lambda product_id: {"title": "Unusable Product"},
+        )
+        monkeypatch.setattr(collector, "_build_product_source", lambda product_id, detail: None)
+
+        result = collector.collect_all()
+
+        assert result.product_sources == []
+        assert result.relationships == []
+        collector.close()
+
+
+class TestKotobukiyaCachedRecords:
+    def test_load_cached_records_dedupes_product_sources(self, tmp_path: Path) -> None:
+        cache = CollectorCache(tmp_path, "kotobukiya")
+        product = {
+            "product_source_id": "p4934054083237",
+            "product_source_key": "kotobukiya-product:en:p4934054083237",
+            "source": "kotobukiya_product",
+            "manufacturer": "KOTOBUKIYA",
+            "locale": "en",
+            "market": "jp-shop",
+            "title": "Shared Product",
+            "collected_at": "2026-06-06T00:00:00+00:00",
+        }
+        cache.save_records(
+            [
+                {"instruction_id": "538", "title": "Manual 1"},
+                {"instruction_id": "228", "title": "Manual 2"},
+            ],
+            "manuals.json",
+        )
+        cache.save_records([product, product.copy()], "product_sources.json")
+        cache.save_records(
+            [
+                {
+                    "from_key": "kotobukiya:538",
+                    "to_key": "kotobukiya-product:p4934054083237",
+                    "relationship": "manual_for_product",
+                    "status": "confirmed",
+                    "method": "official_instruction_detail_product_link",
+                },
+                {
+                    "from_key": "kotobukiya:228",
+                    "to_key": "kotobukiya-product:p4934054083237",
+                    "relationship": "manual_for_product",
+                    "status": "confirmed",
+                    "method": "official_instruction_detail_product_link",
+                },
+            ],
+            "relationships.json",
+        )
+        cache.close()
+
+        collection = KotobukiyaSource().load_cached_records(tmp_path)
+
+        assert len(collection.product_sources) == 1
+        assert len(collection.relationships) == 2
+        assert collection.product_sources[0].product_source_key == (
+            "kotobukiya-product:en:p4934054083237"
+        )
 
 
 class TestLiveHtmlParserShapes:
