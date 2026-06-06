@@ -1,0 +1,3 @@
+{"file": ".trellis/tasks/06-06-bandai-source-collection/research/bandai-manual-schedule-collection.md", "reason": "Bandai manual/schedule source research, schema decisions, matching strategy, and incremental collection rules"}
+{"file": ".trellis/tasks/06-06-bandai-source-collection/research/kotobukiya-manual-product-collection.md", "reason": "Kotobukiya instruction/product detail research and confirmed manual-product mapping strategy"}
+{"file": ".trellis/tasks/06-06-bandai-source-collection/info.md", "reason": "Cross-source schema design for manuals, products, relationships, releases, prices, and taxonomy"}
