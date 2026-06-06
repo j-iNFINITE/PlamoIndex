@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Code standards, Pydantic conventions, identity key patterns, common mistakes"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Project module organization and file layout"}
+{"file": ".trellis/tasks/archive/2026-06/06-06-bandai-source-collection/research/bandai-manual-schedule-collection.md", "reason": "Bandai manual, schedule, taxonomy, matching, and incremental collection research"}
+{"file": ".trellis/tasks/archive/2026-06/06-06-bandai-source-collection/research/kotobukiya-manual-product-collection.md", "reason": "Kotobukiya instruction/product research and confirmed relationship strategy"}
+{"file": ".trellis/tasks/archive/2026-06/06-06-bandai-source-collection/info.md", "reason": "Cross-source schema design for manuals, products, relationships, releases, prices, taxonomy"}

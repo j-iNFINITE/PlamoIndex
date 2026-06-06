@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify code conventions compliance"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify project layout compliance"}
+{"file": ".trellis/tasks/archive/2026-06/06-06-bandai-source-collection/research/bandai-manual-schedule-collection.md", "reason": "Verify Bandai implementation against researched behavior"}
+{"file": ".trellis/tasks/archive/2026-06/06-06-bandai-source-collection/research/kotobukiya-manual-product-collection.md", "reason": "Verify Kotobukiya implementation against researched behavior"}
+{"file": ".trellis/tasks/archive/2026-06/06-06-bandai-source-collection/info.md", "reason": "Verify schema design compliance"}
