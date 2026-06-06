@@ -11,6 +11,7 @@ Commands:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,6 +22,27 @@ from plamoindex.config import load_config
 from plamoindex.curated.validator import validate_curated_directory
 from plamoindex.dataset import build_dataset
 from plamoindex.sources.registry import get_source, list_sources
+
+
+def _resolve_sources(source: tuple[str, ...]) -> list[str]:
+    """Resolve the --source option to a list of source IDs.
+
+    If no sources are specified, returns all registered sources.
+    If 'all' is specified, returns all registered sources.
+    Otherwise returns the specified source IDs.
+
+    Args:
+        source: Tuple of source IDs from the --source option.
+
+    Returns:
+        List of resolved source IDs.
+    """
+    if not source:
+        return list_sources()
+    source_list = list(source)
+    if "all" in source_list:
+        return list_sources()
+    return source_list
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -54,20 +76,44 @@ def sources_list() -> None:
 @main.command()
 @click.option("--source", multiple=True, help="Source plugin(s) to collect from (default: all)")
 @click.option(
+    "--raw",
+    "raw_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Path to store raw collection data (default: data/raw/)",
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, dir_okay=False),
     default=None,
     help="Path to plamoindex.yml config file",
 )
-def collect(source: tuple[str, ...], config_path: str | None) -> None:
+def collect(source: tuple[str, ...], raw_dir: str | None, config_path: str | None) -> None:
     """Collect raw records from source plugins."""
-    source_ids = list(source) if source else list_sources()
+    cfg_path = Path(config_path) if config_path else None
+    config = load_config(cfg_path)
 
-    click.echo(f"Collecting from {len(source_ids)} source(s)...")
+    source_ids = _resolve_sources(source)
+    raw_path = Path(raw_dir) if raw_dir else Path(config.raw.path)
+    raw_path.mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"Collecting from {len(source_ids)} source(s) into {raw_path}...")
+
+    total_manuals = 0
+    total_product_sources = 0
+    total_products = 0
+    total_relationships = 0
+    failures = 0
+
     for sid in source_ids:
         try:
             plugin = get_source(sid)
+
+            # Configure plugin with raw path
+            if hasattr(plugin, "configure"):
+                plugin.configure(config, raw_path)
+
             manuals = plugin.collect_manuals()
             product_sources = plugin.collect_product_sources()
             products = plugin.collect_products()
@@ -78,12 +124,26 @@ def collect(source: tuple[str, ...], config_path: str | None) -> None:
             click.echo(f"    product_sources: {len(product_sources)}")
             click.echo(f"    products: {len(products)}")
             click.echo(f"    relationships: {len(relationships)}")
+
+            total_manuals += len(manuals)
+            total_product_sources += len(product_sources)
+            total_products += len(products)
+            total_relationships += len(relationships)
         except KeyError as exc:
             click.echo(f"  {sid}: ERROR - {exc}", err=True)
+            failures += 1
         except Exception as exc:
             click.echo(f"  {sid}: FAILED - {exc}", err=True)
+            failures += 1
 
-    click.echo("Collection complete.")
+    click.echo("\nCollection complete.")
+    click.echo(f"  Total manuals: {total_manuals}")
+    click.echo(f"  Total product_sources: {total_product_sources}")
+    click.echo(f"  Total products: {total_products}")
+    click.echo(f"  Total relationships: {total_relationships}")
+    if failures:
+        click.echo(f"  Failures: {failures}", err=True)
+        sys.exit(1)
 
 
 @main.group()
@@ -120,6 +180,13 @@ def curated_validate(curated_dir: str) -> None:
     help="Path to curated/ directory",
 )
 @click.option(
+    "--raw",
+    "raw_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Path to raw/ collection data directory",
+)
+@click.option(
     "--dist",
     "dist_dir",
     type=click.Path(file_okay=False),
@@ -136,6 +203,7 @@ def curated_validate(curated_dir: str) -> None:
 def build(
     source: tuple[str, ...],
     curated_dir: str | None,
+    raw_dir: str | None,
     dist_dir: str | None,
     config_path: str | None,
 ) -> None:
@@ -143,8 +211,11 @@ def build(
     cfg_path = Path(config_path) if config_path else None
     config = load_config(cfg_path)
 
-    source_ids = list(source) if source else None
+    # If sources specified, resolve them; otherwise None = all sources
+    resolved = _resolve_sources(source) if source else None
+    source_ids = resolved
     cdir = Path(curated_dir) if curated_dir else None
+    rdir = Path(raw_dir) if raw_dir else None
     ddir = Path(dist_dir) if dist_dir else None
 
     click.echo("Building dataset...")
@@ -154,6 +225,7 @@ def build(
         source_ids=source_ids,
         curated_dir=cdir,
         dist_dir=ddir,
+        raw_dir=rdir,
     )
 
     for sid, status in result.source_statuses.items():
@@ -172,8 +244,9 @@ def build(
         counts = result.index_data.get("counts", {})
         click.echo("\nBuild complete:")
         click.echo(f"  Total manuals: {counts.get('total', 0)}")
-        click.echo(f"  Total products: {len(result.products)}")
-        click.echo(f"  Total relationships: {len(result.relationships)}")
+        click.echo(f"  Total products: {counts.get('products', 0)}")
+        click.echo(f"  Total relationships: {counts.get('relationships', 0)}")
+        click.echo(f"  Total product_sources: {counts.get('product_sources', 0)}")
     else:
         click.echo("\nBuild did not produce output (check errors above).", err=True)
 
@@ -186,6 +259,13 @@ def build(
     type=click.Path(exists=True, file_okay=False),
     default=None,
     help="Path to curated/ directory",
+)
+@click.option(
+    "--raw",
+    "raw_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Path to raw/ collection data directory",
 )
 @click.option(
     "--dist",
@@ -204,12 +284,28 @@ def build(
 def sync(
     source: tuple[str, ...],
     curated_dir: str | None,
+    raw_dir: str | None,
     dist_dir: str | None,
     config_path: str | None,
 ) -> None:
     """Collect from sources and build dataset in one step."""
     ctx = click.get_current_context()
-    ctx.invoke(build, source=source, curated_dir=curated_dir, dist_dir=dist_dir, config_path=config_path)
+    # Run collect first
+    ctx.invoke(
+        collect,
+        source=source,
+        raw_dir=raw_dir,
+        config_path=config_path,
+    )
+    # Then build
+    ctx.invoke(
+        build,
+        source=source,
+        curated_dir=curated_dir,
+        raw_dir=raw_dir,
+        dist_dir=dist_dir,
+        config_path=config_path,
+    )
 
 
 @main.command()
@@ -234,6 +330,13 @@ def validate(dist_dir: str) -> None:
         "manuals.curated.v1.json",
         "sources.json",
         "checksums.json",
+        "products.latest.json",
+        "products.compact.v1.json",
+        "products.bandai.v1.json",
+        "products.kotobukiya.v1.json",
+        "product-sources.bandai.v1.json",
+        "product-sources.kotobukiya.v1.json",
+        "relationships.v1.json",
     ]
 
     missing = [fn for fn in expected_files if not (ddir / fn).is_file()]
@@ -247,8 +350,6 @@ def validate(dist_dir: str) -> None:
     click.echo("All required files present.")
 
     # Validate index.json structure
-    import json
-
     try:
         with open(ddir / "index.json", encoding="utf-8") as fh:
             index = json.load(fh)
@@ -256,13 +357,50 @@ def validate(dist_dir: str) -> None:
         click.echo(f"Invalid index.json: {exc}", err=True)
         sys.exit(1)
 
-    required_keys = ["schema_version", "dataset_version", "generator_version", "generated_at", "counts"]
+    required_keys = [
+        "schema_version", "dataset_version", "generator_version",
+        "generated_at", "counts", "files", "sources",
+    ]
     missing_keys = [k for k in required_keys if k not in index]
     if missing_keys:
         click.echo(f"index.json missing keys: {missing_keys}", err=True)
         sys.exit(1)
 
-    click.echo("index.json structure valid.")
+    # Validate counts include product/relationship counts
+    counts = index.get("counts", {})
+    for count_key in ("total", "products", "product_sources", "relationships"):
+        if count_key not in counts:
+            click.echo(f"index.json counts missing '{count_key}'", err=True)
+            sys.exit(1)
+
+    # Validate checksums
+    checksums_path = ddir / "checksums.json"
+    try:
+        with open(checksums_path, encoding="utf-8") as fh:
+            checksums = json.load(fh)
+    except (json.JSONDecodeError, IOError) as exc:
+        click.echo(f"Invalid checksums.json: {exc}", err=True)
+        sys.exit(1)
+
+    # checksums.json cannot contain its own hash, so exclude it from the check
+    files_with_checksum = [fn for fn in expected_files if fn != "checksums.json"]
+    missing_checksums = [fn for fn in files_with_checksum if fn not in checksums]
+    if missing_checksums:
+        click.echo(f"Missing checksums for: {missing_checksums}", err=True)
+        sys.exit(1)
+
+    # Validate each JSON file is valid
+    for fn in expected_files:
+        try:
+            with open(ddir / fn, encoding="utf-8") as fh:
+                json.load(fh)
+        except (json.JSONDecodeError, IOError) as exc:
+            click.echo(f"Invalid {fn}: {exc}", err=True)
+            sys.exit(1)
+
+    click.echo(f"index.json structure valid ({counts.get('total', 0)} manuals, "
+               f"{counts.get('products', 0)} products, "
+               f"{counts.get('relationships', 0)} relationships).")
 
 
 if __name__ == "__main__":

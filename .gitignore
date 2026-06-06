@@ -8,6 +8,9 @@ venv/
 # Build output
 dist/
 
+# Collection cache
+data/raw/
+
 # Cache
 .ruff_cache/
 .mypy_cache/

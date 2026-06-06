@@ -43,6 +43,24 @@ class CuratedOverrideEntry(BaseModel):
     reason: str
 
 
+class CuratedMappingEntry(BaseModel):
+    """A curated mapping entry connecting product sources to merged products.
+
+    Used to confirm or promote relationships that automated matching cannot
+    establish, especially Bandai Chinese schedule records.
+    """
+
+    product_key: str
+    zh_schedule_key: str | None = None
+    ja_schedule_key: str | None = None
+    en_schedule_key: str | None = None
+    manual_source_key: str | None = None
+    status: str = "confirmed"
+    method: str | None = None
+    reason: str | None = None
+    confidence: float | None = None
+
+
 class CuratedVendorFile(BaseModel):
     """Schema for curated/vendors/*.yaml files."""
 
@@ -56,6 +74,12 @@ class CuratedOverridesFile(BaseModel):
     """Schema for curated/overrides.yaml."""
 
     overrides: list[CuratedOverrideEntry] = []
+
+
+class CuratedMappingsFile(BaseModel):
+    """Schema for curated/mappings.yaml."""
+
+    mappings: list[CuratedMappingEntry] = []
 
 
 class CuratedAliasesFile(BaseModel):
@@ -90,6 +114,36 @@ def load_curated_overrides(path: Path) -> CuratedOverridesFile:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return CuratedOverridesFile.model_validate(data or {"overrides": []})
+
+
+def load_curated_mappings(path: Path) -> CuratedMappingsFile:
+    """Load curated mappings YAML file.
+
+    Args:
+        path: Path to the mappings YAML file.
+
+    Returns:
+        CuratedMappingsFile instance.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return CuratedMappingsFile.model_validate(data or {"mappings": []})
+
+
+def load_all_mappings(curated_dir: Path) -> list[CuratedMappingEntry]:
+    """Load all curated mappings from curated directory.
+
+    Args:
+        curated_dir: Path to curated/ directory.
+
+    Returns:
+        List of CuratedMappingEntry.
+    """
+    mappings_path = curated_dir / "mappings.yaml"
+    if not mappings_path.is_file():
+        return []
+    mappings_file = load_curated_mappings(mappings_path)
+    return mappings_file.mappings
 
 
 def load_curated_aliases(path: Path) -> CuratedAliasesFile:

@@ -1,0 +1,162 @@
+# plamoindex
+
+**plamoindex** is a Python CLI tool that generates static JSON metadata datasets for plastic model manual sources. It collects manual, product, and relationship metadata from official manufacturer websites and produces structured JSON output files for downstream use.
+
+## Features
+
+- Collects manual metadata from Bandai (`manual.bandai-hobby.net`) and Kotobukiya (`kotobukiya.co.jp`) official sources.
+- Collects product/schedule metadata from Bandai Japanese, English, and Chinese schedule pages.
+- Collects product metadata from Kotobukiya product detail pages.
+- Merges cross-locale product data (Bandai ja/en by shared product IDs).
+- Supports curated vendor records, overrides, aliases, and product mappings via YAML files.
+- Incremental collection with content-based caching.
+- Polite crawling with configurable delays, jitter, and retry logic.
+- Generates structured JSON output: manuals, products, product sources, relationships, and integrity checksums.
+
+## Installation
+
+```bash
+pip install plamoindex
+```
+
+Or from source:
+
+```bash
+git clone <repo-url>
+cd plamoindex
+pip install -e .
+```
+
+For development:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Usage
+
+### List source plugins
+
+```bash
+plamoindex sources list
+```
+
+### Collect raw data from sources
+
+```bash
+# Collect from all sources
+plamoindex collect --raw data/raw/
+
+# Collect from a specific source
+plamoindex collect --source bandai --raw data/raw/
+
+# Collect from multiple sources
+plamoindex collect --source bandai --source kotobukiya --raw data/raw/
+```
+
+### Validate curated YAML data
+
+```bash
+plamoindex curated validate curated/
+```
+
+### Build dataset from collected and curated data
+
+```bash
+plamoindex build --curated curated/ --dist dist/
+```
+
+### Collect and build in one step
+
+```bash
+plamoindex sync --source all --curated curated/ --dist dist/
+```
+
+### Validate output
+
+```bash
+plamoindex validate --dist dist/
+```
+
+## Configuration
+
+The runtime configuration file `plamoindex.yml` controls HTTP settings, source delays, data paths, and dataset metadata:
+
+```yaml
+schema_version: 1
+http:
+  timeout_seconds: 30
+  retry_count: 3
+  delay_seconds: 1.0
+  user_agent: "plamoindex/0.1 (+https://github.com/plamoindex/plamoindex)"
+sources:
+  bandai:
+    enabled: true
+    delay_seconds: 1.0
+  kotobukiya:
+    enabled: true
+    delay_seconds: 1.0
+curated:
+  path: curated/
+raw:
+  path: data/raw/
+output:
+  dist: dist/
+  compact: true
+dataset:
+  base_url: "https://manuals.example.com"
+```
+
+## Output Files
+
+The `build` or `sync` command produces the following files in the `dist/` directory:
+
+| File | Description |
+|------|-------------|
+| `index.json` | Dataset index with version, counts, and source statuses |
+| `schema.v1.json` | JSON Schema for ManualRecord |
+| `manuals.latest.json` | All manual records (full) |
+| `manuals.compact.v1.json` | Compact manual records (downstream search) |
+| `manuals.bandai.v1.json` | Bandai manual records |
+| `manuals.kotobukiya.v1.json` | Kotobukiya manual records |
+| `manuals.curated.v1.json` | Curated manual records |
+| `products.latest.json` | All merged product records |
+| `products.compact.v1.json` | Compact product records |
+| `products.bandai.v1.json` | Bandai product records |
+| `products.kotobukiya.v1.json` | Kotobukiya product records |
+| `product-sources.bandai.v1.json` | Bandai product source records |
+| `product-sources.kotobukiya.v1.json` | Kotobukiya product source records |
+| `relationships.v1.json` | Relationship records (manual-product links) |
+| `sources.json` | Per-source collection status |
+| `checksums.json` | SHA-256 checksums of all output files |
+
+## Identity Key Conventions
+
+| Key Type | Format | Example |
+|----------|--------|---------|
+| Manual | `{source}:{source_id}` | `bandai:5119` |
+| Product Source | `{source-family}:{locale}:{id}` | `bandai-schedule:en:01_7017` |
+| Merged Product | `{manufacturer}-product:{stable_id}` | `bandai-product:01_7017` |
+| Relationship | `rel:{type}:{from}:{to}` | `rel:manual-product:bandai:5119:bandai-product:01_7017` |
+
+## Development
+
+### Quality Gate
+
+```bash
+ruff check src/ tests/
+mypy src/
+python -m pytest
+```
+
+### Test Suite
+
+Tests use temporary directories and fixture data -- no live network access required.
+
+```bash
+python -m pytest -v
+```
+
+## License
+
+MIT

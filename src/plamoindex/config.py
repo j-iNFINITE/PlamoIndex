@@ -6,6 +6,7 @@ Loads settings from plamoindex.yml with sensible defaults.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
@@ -17,7 +18,9 @@ class HttpSettings(BaseModel):
     timeout_seconds: float = 30.0
     retry_count: int = 3
     delay_seconds: float = 1.0
-    user_agent: str = "plamoindex/0.1"
+    jitter_seconds: float = 0.5
+    backoff_base: float = 1.0
+    user_agent: str = "plamoindex/0.1 (+https://github.com/plamoindex/plamoindex)"
 
 
 class SourceSettings(BaseModel):
@@ -40,6 +43,12 @@ class OutputSettings(BaseModel):
     compact: bool = True
 
 
+class RawSettings(BaseModel):
+    """Raw collection data settings."""
+
+    path: str = "data/raw/"
+
+
 class DatasetSettings(BaseModel):
     """Dataset settings."""
 
@@ -51,8 +60,9 @@ class PlamoIndexConfig(BaseModel):
 
     schema_version: int = 1
     http: HttpSettings = Field(default_factory=HttpSettings)
-    sources: dict[str, SourceSettings] = Field(default_factory=dict)
+    sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
     curated: CuratedSettings = Field(default_factory=CuratedSettings)
+    raw: RawSettings = Field(default_factory=RawSettings)
     output: OutputSettings = Field(default_factory=OutputSettings)
     dataset: DatasetSettings = Field(default_factory=DatasetSettings)
 

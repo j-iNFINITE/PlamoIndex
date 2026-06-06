@@ -9,7 +9,7 @@ import pytest
 from plamoindex.curated.loader import CuratedOverrideEntry
 from plamoindex.merge import DuplicateKeyError, merge_manuals, merge_product_sources, validate_final_dataset
 from plamoindex.models.manual import ManualRecord
-from plamoindex.models.product import ProductRecord, ProductSourceRecord
+from plamoindex.models.product import ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
 from plamoindex.models.shared import PriceInfo, Provenance, ReleaseInfo
 
@@ -30,7 +30,9 @@ def _make_manual(key: str, source: str = "bandai", sid: str = "1") -> ManualReco
     )
 
 
-def _make_product_source(key: str, locale: str = "en", source: str = "bandai_schedule_en", pid: str = "01_7017") -> ProductSourceRecord:
+def _make_product_source(
+    key: str, locale: str = "en", source: str = "bandai_schedule_en", pid: str = "01_7017",
+) -> ProductSourceRecord:
     return ProductSourceRecord(
         product_source_key=key,
         source=source,
@@ -101,7 +103,7 @@ class TestMergeProductSources:
         ps = _make_product_source("bandai-schedule:en:01_7017", locale="en")
         products, rels = merge_product_sources([ps])
         assert len(products) == 1
-        assert products[0].product_key == "bandai_spirits-product:01_7017"
+        assert products[0].product_key == "bandai-product:01_7017"
         assert products[0].titles == {"en": "Test 01_7017"}
 
     def test_duplicate_source_key(self) -> None:

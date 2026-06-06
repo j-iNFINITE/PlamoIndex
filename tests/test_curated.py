@@ -4,17 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 from plamoindex.curated.loader import (
+    CuratedRecordEntry,
+    CuratedVendorFile,
     curated_entry_to_manual_record,
     load_all_curated_vendors,
     load_all_overrides,
     load_curated_vendor,
-    CuratedOverrideEntry,
-    CuratedRecordEntry,
-    CuratedVendorFile,
 )
 from plamoindex.curated.validator import (
     validate_curated_directory,
@@ -181,6 +179,48 @@ class TestCuratedValidator:
         }))
         errors = validate_overrides_yaml(path, known_keys=set())
         assert any("not found" in e for e in errors)
+
+    def test_validate_mappings_yaml(self, tmp_path: Path) -> None:
+        path = tmp_path / "mappings.yaml"
+        path.write_text(yaml.dump({
+            "mappings": [
+                {
+                    "product_key": "bandai-product:01_7017",
+                    "zh_schedule_key": "bandai-schedule:zh-Hans:3236",
+                    "status": "confirmed",
+                    "reason": "Chinese title matches official product",
+                }
+            ],
+        }))
+        from plamoindex.curated.loader import load_curated_mappings
+        mappings = load_curated_mappings(path)
+        assert len(mappings.mappings) == 1
+        assert mappings.mappings[0].product_key == "bandai-product:01_7017"
+        assert mappings.mappings[0].status == "confirmed"
+
+    def test_load_all_mappings_empty(self, tmp_path: Path) -> None:
+        curated_dir = tmp_path / "curated"
+        curated_dir.mkdir()
+        from plamoindex.curated.loader import load_all_mappings
+        mappings = load_all_mappings(curated_dir)
+        assert mappings == []
+
+    def test_load_all_mappings(self, tmp_path: Path) -> None:
+        curated_dir = tmp_path / "curated"
+        curated_dir.mkdir()
+        (curated_dir / "mappings.yaml").write_text(yaml.dump({
+            "mappings": [
+                {
+                    "product_key": "bandai-product:01_7017",
+                    "zh_schedule_key": "bandai-schedule:zh-Hans:3236",
+                    "status": "confirmed",
+                    "reason": "Match confirmed",
+                }
+            ],
+        }))
+        from plamoindex.curated.loader import load_all_mappings
+        mappings = load_all_mappings(curated_dir)
+        assert len(mappings) == 1
 
     def test_validate_directory(self, tmp_path: Path) -> None:
         curated_dir = tmp_path / "curated"

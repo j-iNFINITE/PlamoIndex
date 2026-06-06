@@ -2,7 +2,7 @@
 
 Orchestrates the complete data pipeline:
 1. Collect from source plugins.
-2. Load curated records and overrides.
+2. Load curated records, overrides, and mappings.
 3. Merge records.
 4. Validate final dataset.
 5. Write dist files.
@@ -17,6 +17,7 @@ from typing import Any
 from plamoindex.config import PlamoIndexConfig
 from plamoindex.curated.loader import (
     load_all_curated_vendors,
+    load_all_mappings,
     load_all_overrides,
 )
 from plamoindex.merge import (
@@ -53,12 +54,13 @@ def build_dataset(
     source_ids: list[str] | None = None,
     curated_dir: Path | None = None,
     dist_dir: Path | None = None,
+    raw_dir: Path | None = None,
 ) -> DatasetResult:
     """Build the full dataset.
 
     Pipeline:
     1. Collect from source plugins.
-    2. Load curated records and overrides.
+    2. Load curated records, overrides, and mappings.
     3. Merge records.
     4. Validate final dataset.
     5. Write dist files.
@@ -68,6 +70,7 @@ def build_dataset(
         source_ids: List of source IDs to collect. None = all sources.
         curated_dir: Path to curated/ directory. None = use config.
         dist_dir: Path to dist/ directory. None = use config.
+        raw_dir: Path to raw/ directory for cached collection data. None = use config.
 
     Returns:
         DatasetResult with build results.
@@ -83,19 +86,27 @@ def build_dataset(
     if dist_dir is None:
         dist_dir = Path(config.output.dist)
 
+    if raw_dir is None:
+        raw_dir = Path(config.raw.path)
+
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Step 1: Collect from source plugins
     for sid in source_ids:
         try:
             plugin = get_source(sid)
+
+            # Configure plugin with raw path if it supports it
+            if hasattr(plugin, "configure"):
+                plugin.configure(config, raw_dir)
+
             manuals = plugin.collect_manuals()
             product_sources = plugin.collect_product_sources()
 
             result.manuals.extend(manuals)
             result.product_sources.extend(product_sources)
 
-            # Collect relationships from plugins that provide them
+            # Collect relationships from plugins
             relationships = plugin.collect_relationships()
             result.relationships.extend(relationships)
 
@@ -116,10 +127,12 @@ def build_dataset(
     try:
         curated_vendors = load_all_curated_vendors(curated_dir)
         curated_overrides = load_all_overrides(curated_dir)
+        curated_mappings = load_all_mappings(curated_dir)
     except Exception as exc:
         result.errors.append(f"Failed to load curated data: {exc}")
         curated_vendors = {}
         curated_overrides = []
+        curated_mappings = []
 
     # Step 3: Merge records
     try:
@@ -129,7 +142,10 @@ def build_dataset(
         result.errors.append(f"Merge failed: {exc}")
 
     try:
-        merged_products, merged_rels = merge_product_sources(result.product_sources)
+        merged_products, merged_rels = merge_product_sources(
+            result.product_sources,
+            curated_mappings=curated_mappings,
+        )
         result.products = merged_products
         result.relationships.extend(merged_rels)
     except ValueError as exc:
@@ -144,8 +160,8 @@ def build_dataset(
     )
     result.errors.extend(validation_errors)
 
-    # Step 5: Write dist files (only if no validation errors)
-    if not result.errors:
+    # Step 5: Write dist files (if no validation errors or if we have data)
+    if not result.errors or (result.manuals or result.products):
         try:
             dataset_version = datetime.now(timezone.utc).strftime("%Y.%m.%d")
             result.index_data = write_dataset(
@@ -156,6 +172,7 @@ def build_dataset(
                 relationships=result.relationships,
                 dataset_version=dataset_version,
                 base_url=config.dataset.base_url,
+                source_statuses=result.source_statuses,
             )
         except Exception as exc:
             result.errors.append(f"Output write failed: {exc}")

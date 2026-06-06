@@ -6,14 +6,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from plamoindex.config import PlamoIndexConfig, load_config
+from plamoindex.config import PlamoIndexConfig
 from plamoindex.dataset import DatasetResult, build_dataset
 from plamoindex.models.manual import ManualRecord
 from plamoindex.models.product import ProductRecord, ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
 from plamoindex.models.shared import Provenance
 from plamoindex.output.writer import write_dataset
-from plamoindex.sources.registry import register_builtin, reset
 
 
 def _make_provenance() -> Provenance:

@@ -75,6 +75,7 @@ def write_dataset(
     relationships: list[RelationshipRecord],
     dataset_version: str | None = None,
     base_url: str = "https://manuals.example.com",
+    source_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Write the full dataset to the dist/ directory.
 
@@ -86,6 +87,7 @@ def write_dataset(
         relationships: All relationship records.
         dataset_version: Dataset version string (defaults to today's date).
         base_url: Base URL for dataset references.
+        source_statuses: Real per-source status dict. If None, fabricated.
 
     Returns:
         Dict with index.json contents (for CLI output).
@@ -116,19 +118,20 @@ def write_dataset(
     bandai_product_sources = [ps for ps in product_sources if ps.source.startswith("bandai")]
     kotobukiya_product_sources = [ps for ps in product_sources if ps.source.startswith("kotobukiya")]
 
-    # Source status tracking
-    source_statuses: dict[str, dict[str, Any]] = {
-        "bandai": {
-            "status": "ok",
-            "record_count": len(bandai_manuals),
-            "collected_at": generated_at,
-        },
-        "kotobukiya": {
-            "status": "ok",
-            "record_count": len(kotobukiya_manuals),
-            "collected_at": generated_at,
-        },
-    }
+    # Use real source statuses or fabricate defaults
+    if source_statuses is None:
+        source_statuses = {
+            "bandai": {
+                "status": "ok",
+                "record_count": len(bandai_manuals),
+                "collected_at": generated_at,
+            },
+            "kotobukiya": {
+                "status": "ok",
+                "record_count": len(kotobukiya_manuals),
+                "collected_at": generated_at,
+            },
+        }
 
     # Build compact manual records (used by downstream for search)
     compact_manuals = [
@@ -178,8 +181,51 @@ def write_dataset(
     _write_json(dist_dir / "product-sources.kotobukiya.v1.json", _pydantic_to_dict(kotobukiya_product_sources))
     _write_json(dist_dir / "relationships.v1.json", _pydantic_to_dict(relationships))
 
-    # Compute checksums
+    # Build and write index.json (before checksums so checksums can include it)
+    index_data: dict[str, Any] = {
+        "schema_version": 1,
+        "dataset_version": dataset_version,
+        "generator_version": "0.1.0",
+        "generated_at": generated_at,
+        "base_url": base_url,
+        "files": {
+            "full": "/manuals.latest.json",
+            "compact": "/manuals.compact.v1.json",
+            "bandai": "/manuals.bandai.v1.json",
+            "kotobukiya": "/manuals.kotobukiya.v1.json",
+            "curated": "/manuals.curated.v1.json",
+            "schema": "/schema.v1.json",
+            "checksums": "/checksums.json",
+            "products": {
+                "full": "/products.latest.json",
+                "compact": "/products.compact.v1.json",
+                "bandai": "/products.bandai.v1.json",
+                "kotobukiya": "/products.kotobukiya.v1.json",
+            },
+            "product_sources": {
+                "bandai": "/product-sources.bandai.v1.json",
+                "kotobukiya": "/product-sources.kotobukiya.v1.json",
+            },
+            "relationships": "/relationships.v1.json",
+        },
+        "counts": {
+            "total": len(manuals),
+            "bandai": len(bandai_manuals),
+            "kotobukiya": len(kotobukiya_manuals),
+            "curated": len(curated_manuals),
+            "products": len(products),
+            "product_sources": len(product_sources),
+            "relationships": len(relationships),
+        },
+        "sources": source_statuses,
+    }
+    _write_json(dist_dir / "index.json", index_data)
+
+    # Compute checksums for all published files (excluding checksums.json itself,
+    # which cannot contain its own hash). index.json is included since it was
+    # written above.
     dist_files = [
+        "index.json",
         "manuals.latest.json",
         "manuals.compact.v1.json",
         "manuals.bandai.v1.json",
@@ -197,31 +243,5 @@ def write_dataset(
     ]
     checksums = compute_checksums(dist_dir, dist_files)
     _write_json(dist_dir / "checksums.json", checksums)
-
-    # Build and write index.json
-    index_data = {
-        "schema_version": 1,
-        "dataset_version": dataset_version,
-        "generator_version": "0.1.0",
-        "generated_at": generated_at,
-        "base_url": base_url,
-        "files": {
-            "full": "/manuals.latest.json",
-            "compact": "/manuals.compact.v1.json",
-            "bandai": "/manuals.bandai.v1.json",
-            "kotobukiya": "/manuals.kotobukiya.v1.json",
-            "curated": "/manuals.curated.v1.json",
-            "schema": "/schema.v1.json",
-            "checksums": "/checksums.json",
-        },
-        "counts": {
-            "total": len(manuals),
-            "bandai": len(bandai_manuals),
-            "kotobukiya": len(kotobukiya_manuals),
-            "curated": len(curated_manuals),
-        },
-        "sources": source_statuses,
-    }
-    _write_json(dist_dir / "index.json", index_data)
 
     return index_data
