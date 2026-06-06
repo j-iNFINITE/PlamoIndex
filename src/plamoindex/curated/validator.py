@@ -5,6 +5,7 @@ Validates curated YAML files against the schema and project rules.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -82,6 +83,114 @@ def validate_vendor_yaml(path: Path) -> list[str]:
     return errors
 
 
+def validate_products_yaml(path: Path) -> list[str]:
+    """Validate a curated products YAML file."""
+    errors: list[str] = []
+
+    if not path.is_file():
+        errors.append(f"File not found: {path}")
+        return errors
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        errors.append(f"YAML parse error in {path}: {e}")
+        return errors
+
+    if not isinstance(data, dict):
+        errors.append(f"Expected a YAML mapping (dict), got {type(data).__name__}: {path}")
+        return errors
+
+    for field in ["source_id", "display_name", "manufacturer"]:
+        if field not in data:
+            errors.append(f"Missing required field '{field}' in {path}")
+
+    products = data.get("products", [])
+    if not isinstance(products, list):
+        errors.append(f"'products' must be a list in {path}")
+        return errors
+
+    seen_keys: set[str] = set()
+    file_source_id = str(data.get("source_id", ""))
+    file_locale = str(data.get("locale", "ja"))
+    for i, product in enumerate(products):
+        if not isinstance(product, dict):
+            errors.append(f"Product {i} is not a mapping in {path}")
+            continue
+
+        product_id = product.get("product_id")
+        if not product_id:
+            errors.append(f"Product {i} missing 'product_id' in {path}")
+        if "title" not in product:
+            errors.append(f"Product '{product_id}' missing required field 'title' in {path}")
+
+        locale = str(product.get("locale", file_locale))
+        product_source_id = str(product.get("product_source_id", product_id or ""))
+        product_source_key = str(
+            product.get("product_source_key")
+            or f"{file_source_id}-product:{locale}:{product_source_id}"
+        )
+        if product_source_key in seen_keys:
+            errors.append(f"Duplicate product_source_key '{product_source_key}' in {path}")
+        seen_keys.add(product_source_key)
+
+        release_date = product.get("release_date")
+        if release_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(release_date)):
+            errors.append(
+                f"Product '{product_id}' has invalid release_date "
+                f"(expected YYYY-MM-DD) in {path}"
+            )
+        release_month = product.get("release_month")
+        if release_month and not re.fullmatch(r"\d{4}-\d{2}", str(release_month)):
+            errors.append(
+                f"Product '{product_id}' has invalid release_month "
+                f"(expected YYYY-MM) in {path}"
+            )
+
+        if "price_amount" in product:
+            _validate_numeric(errors, product["price_amount"], f"Product '{product_id}' price_amount", path)
+
+        prices = product.get("prices", [])
+        if prices is None:
+            prices = []
+        if not isinstance(prices, list):
+            errors.append(f"Product '{product_id}' prices must be a list in {path}")
+        else:
+            for price_index, price in enumerate(prices):
+                if not isinstance(price, dict):
+                    errors.append(
+                        f"Product '{product_id}' price {price_index} is not a mapping in {path}"
+                    )
+                    continue
+                if "amount" not in price:
+                    errors.append(
+                        f"Product '{product_id}' price {price_index} missing amount in {path}"
+                    )
+                else:
+                    _validate_numeric(
+                        errors,
+                        price["amount"],
+                        f"Product '{product_id}' price {price_index} amount",
+                        path,
+                    )
+
+        manual_source_keys = product.get("manual_source_keys", [])
+        if manual_source_keys is None:
+            manual_source_keys = []
+        if not isinstance(manual_source_keys, list):
+            errors.append(f"Product '{product_id}' manual_source_keys must be a list in {path}")
+        else:
+            for manual_key in manual_source_keys:
+                if ":" not in str(manual_key):
+                    errors.append(
+                        f"Product '{product_id}' manual_source_key '{manual_key}' "
+                        f"must use source:id format in {path}"
+                    )
+
+    return errors
+
+
 def validate_overrides_yaml(path: Path, known_keys: set[str] | None = None) -> list[str]:
     """Validate curated overrides YAML file.
 
@@ -133,6 +242,18 @@ def validate_overrides_yaml(path: Path, known_keys: set[str] | None = None) -> l
             errors.append(f"Override '{key}' missing 'reason' field in {path}")
 
     return errors
+
+
+def _validate_numeric(
+    errors: list[str],
+    value: str | int | float,
+    label: str,
+    path: Path,
+) -> None:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        errors.append(f"{label} must be numeric in {path}")
 
 
 def validate_mappings_yaml(path: Path) -> list[str]:
@@ -242,6 +363,13 @@ def validate_curated_directory(curated_dir: Path) -> dict[str, list[str]]:
                     all_keys.add(record.manual_source_key)
             except Exception:
                 pass
+
+    products_dir = curated_dir / "products"
+    if products_dir.is_dir():
+        for yaml_file in sorted(products_dir.glob("*.yaml")):
+            errors = validate_products_yaml(yaml_file)
+            if errors:
+                results[str(yaml_file)] = errors
 
     # Validate overrides
     overrides_path = curated_dir / "overrides.yaml"

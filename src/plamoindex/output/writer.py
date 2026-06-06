@@ -113,10 +113,14 @@ def write_dataset(
         p for p in products
         if p.manufacturer == "KOTOBUKIYA" or p.product_key.startswith("kotobukiya")
     ]
+    curated_products = [p for p in products if p.source_type == "curated"]
 
     # Categorize product sources
     bandai_product_sources = [ps for ps in product_sources if ps.source.startswith("bandai")]
     kotobukiya_product_sources = [ps for ps in product_sources if ps.source.startswith("kotobukiya")]
+    curated_product_sources = [
+        ps for ps in product_sources if ps.provenance.collection_method == "manual"
+    ]
 
     # Use real source statuses or fabricate defaults
     if source_statuses is None:
@@ -177,8 +181,13 @@ def write_dataset(
     _write_json(dist_dir / "products.compact.v1.json", _pydantic_to_dict(products))
     _write_json(dist_dir / "products.bandai.v1.json", _pydantic_to_dict(bandai_products))
     _write_json(dist_dir / "products.kotobukiya.v1.json", _pydantic_to_dict(kotobukiya_products))
+    _write_json(dist_dir / "products.curated.v1.json", _pydantic_to_dict(curated_products))
     _write_json(dist_dir / "product-sources.bandai.v1.json", _pydantic_to_dict(bandai_product_sources))
     _write_json(dist_dir / "product-sources.kotobukiya.v1.json", _pydantic_to_dict(kotobukiya_product_sources))
+    _write_json(
+        dist_dir / "product-sources.curated.v1.json",
+        _pydantic_to_dict(curated_product_sources),
+    )
     _write_json(dist_dir / "relationships.v1.json", _pydantic_to_dict(relationships))
 
     # Build and write index.json (before checksums so checksums can include it)
@@ -201,10 +210,12 @@ def write_dataset(
                 "compact": "/products.compact.v1.json",
                 "bandai": "/products.bandai.v1.json",
                 "kotobukiya": "/products.kotobukiya.v1.json",
+                "curated": "/products.curated.v1.json",
             },
             "product_sources": {
                 "bandai": "/product-sources.bandai.v1.json",
                 "kotobukiya": "/product-sources.kotobukiya.v1.json",
+                "curated": "/product-sources.curated.v1.json",
             },
             "relationships": "/relationships.v1.json",
         },
@@ -237,8 +248,10 @@ def write_dataset(
         "products.compact.v1.json",
         "products.bandai.v1.json",
         "products.kotobukiya.v1.json",
+        "products.curated.v1.json",
         "product-sources.bandai.v1.json",
         "product-sources.kotobukiya.v1.json",
+        "product-sources.curated.v1.json",
         "relationships.v1.json",
     ]
     checksums = compute_checksums(dist_dir, dist_files)

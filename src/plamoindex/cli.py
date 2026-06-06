@@ -14,12 +14,14 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
+import yaml
 
 from plamoindex import __version__
 from plamoindex.config import load_config
-from plamoindex.curated.validator import validate_curated_directory
+from plamoindex.curated.validator import validate_curated_directory, validate_products_yaml
 from plamoindex.dataset import build_dataset, collect_sources
 from plamoindex.output.checksums import sha256_hex
 from plamoindex.sources.registry import get_source, list_sources
@@ -44,6 +46,214 @@ def _resolve_sources(source: tuple[str, ...]) -> list[str]:
     if "all" in source_list:
         return list_sources()
     return source_list
+
+
+def _optional_prompt(label: str, default: str | None = None) -> str | None:
+    """Prompt for an optional string value."""
+    value = click.prompt(
+        label,
+        default=default or "",
+        show_default=bool(default),
+    )
+    text = str(value).strip()
+    return text or None
+
+
+def _select_or_enter(
+    label: str,
+    choices: list[str],
+    default: str | None = None,
+) -> str | None:
+    """Prompt with known choices while allowing custom input."""
+    unique_choices = sorted({choice for choice in choices if choice})
+    if unique_choices:
+        click.echo(f"已有{label}：")
+        for index, choice in enumerate(unique_choices, start=1):
+            click.echo(f"  {index}. {choice}")
+        value = click.prompt(
+            f"{label}（输入编号选择已有项，或输入新值）",
+            default=default or "",
+            show_default=bool(default),
+        )
+        text = str(value).strip()
+        if text.isdigit():
+            choice_index = int(text)
+            if 1 <= choice_index <= len(unique_choices):
+                return unique_choices[choice_index - 1]
+        return text or None
+    return _optional_prompt(label, default)
+
+
+def _split_keys(value: str | None) -> list[str] | None:
+    """Split a comma-separated key list into normalized strings."""
+    if not value:
+        return None
+    keys = [key.strip() for key in value.split(",") if key.strip()]
+    return keys or None
+
+
+def _string_value(value: Any) -> str | None:
+    """Return a non-empty string from YAML data."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _taxonomy_label(value: Any) -> str | None:
+    """Extract a human label from string or mapping taxonomy YAML."""
+    if isinstance(value, str):
+        return _string_value(value)
+    if isinstance(value, dict):
+        for key in ("label", "line_name", "slug", "id"):
+            label = _string_value(value.get(key))
+            if label:
+                return label
+    return None
+
+
+def _read_curated_choice_data(curated_dir: Path) -> dict[str, Any]:
+    """Read existing curated data to offer product-entry choices."""
+    profiles: dict[str, dict[str, str]] = {}
+    manufacturers: set[str] = set()
+    series: set[str] = set()
+    scales: set[str] = set()
+
+    products_dir = curated_dir / "products"
+    if products_dir.is_dir():
+        for yaml_file in sorted(products_dir.glob("*.yaml")):
+            data = _load_yaml_mapping(yaml_file)
+            source_id = _string_value(data.get("source_id"))
+            display_name = _string_value(data.get("display_name"))
+            manufacturer = _string_value(data.get("manufacturer"))
+            locale = _string_value(data.get("locale"))
+            market = _string_value(data.get("market"))
+            if source_id:
+                profile: dict[str, str] = {"source_id": source_id}
+                for key, value in (
+                    ("display_name", display_name),
+                    ("manufacturer", manufacturer),
+                    ("locale", locale),
+                    ("market", market),
+                ):
+                    if value:
+                        profile[key] = value
+                profiles[source_id] = profile
+            if manufacturer:
+                manufacturers.add(manufacturer)
+            _collect_product_choices(data.get("products"), series, scales)
+
+    vendors_dir = curated_dir / "vendors"
+    if vendors_dir.is_dir():
+        for yaml_file in sorted(vendors_dir.glob("*.yaml")):
+            data = _load_yaml_mapping(yaml_file)
+            source_id = _string_value(data.get("source_id"))
+            display_name = _string_value(data.get("display_name"))
+            records = data.get("records")
+            first_brand = _first_record_string(records, "brand")
+            if first_brand:
+                manufacturers.add(first_brand)
+            if source_id and source_id not in profiles:
+                profile = {"source_id": source_id}
+                if display_name:
+                    profile["display_name"] = display_name
+                if first_brand:
+                    profile["manufacturer"] = first_brand
+                profiles[source_id] = profile
+            _collect_vendor_record_choices(records, series, scales)
+
+    return {
+        "profiles": profiles,
+        "manufacturers": sorted(manufacturers),
+        "series": sorted(series),
+        "scales": sorted(scales),
+    }
+
+
+def _collect_product_choices(products: Any, series: set[str], scales: set[str]) -> None:
+    if not isinstance(products, list):
+        return
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        series_label = _taxonomy_label(product.get("series"))
+        if series_label:
+            series.add(series_label)
+        specs = product.get("specs")
+        if isinstance(specs, dict):
+            scale = _string_value(specs.get("scale"))
+            if scale:
+                scales.add(scale)
+
+
+def _collect_vendor_record_choices(records: Any, series: set[str], scales: set[str]) -> None:
+    if not isinstance(records, list):
+        return
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        series_value = _string_value(record.get("series"))
+        if series_value:
+            series.add(series_value)
+        scale = _string_value(record.get("scale"))
+        if scale:
+            scales.add(scale)
+
+
+def _first_record_string(records: Any, key: str) -> str | None:
+    if not isinstance(records, list):
+        return None
+    for record in records:
+        if isinstance(record, dict):
+            value = _string_value(record.get(key))
+            if value:
+                return value
+    return None
+
+
+def _select_source_profile(choice_data: dict[str, Any]) -> dict[str, str] | None:
+    """Select an existing curated source profile, or return None for a new one."""
+    raw_profiles = choice_data.get("profiles", {})
+    if not isinstance(raw_profiles, dict) or not raw_profiles:
+        return None
+
+    profiles = [
+        profile
+        for profile in raw_profiles.values()
+        if isinstance(profile, dict) and isinstance(profile.get("source_id"), str)
+    ]
+    profiles.sort(key=lambda profile: str(profile["source_id"]))
+    click.echo("已有数据源：")
+    for index, profile in enumerate(profiles, start=1):
+        manufacturer = profile.get("manufacturer") or profile.get("display_name") or ""
+        suffix = f" ({manufacturer})" if manufacturer else ""
+        click.echo(f"  {index}. {profile['source_id']}{suffix}")
+    value = click.prompt("数据源 ID（输入编号选择已有项，或输入新值）", default="", show_default=False)
+    text = str(value).strip()
+    if text.isdigit():
+        choice_index = int(text)
+        if 1 <= choice_index <= len(profiles):
+            return {str(key): str(value) for key, value in profiles[choice_index - 1].items()}
+    return {"source_id": text} if text else None
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    """Load a YAML mapping or return an empty mapping for missing files."""
+    if not path.is_file():
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise click.ClickException(f"{path} 应为 YAML mapping。")
+    return data
+
+
+def _write_yaml_mapping(path: Path, data: dict[str, Any]) -> None:
+    """Write a YAML mapping using repository-friendly formatting."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -125,6 +335,149 @@ def collect(source: tuple[str, ...], raw_dir: str | None, config_path: str | Non
 @main.group()
 def curated() -> None:
     """Manage curated YAML data."""
+
+
+@curated.group("product")
+def curated_product() -> None:
+    """Manage curated product metadata."""
+
+
+@curated_product.command("add")
+@click.option(
+    "--curated",
+    "curated_dir",
+    type=click.Path(file_okay=False),
+    default="curated",
+    help="Path to curated/ directory.",
+)
+@click.option("--source-id", default=None, help="Curated source id, e.g. hasegawa.")
+@click.option("--display-name", default=None, help="Human-readable source name.")
+@click.option("--manufacturer", default=None, help="Manufacturer name used in output.")
+@click.option("--locale", default="ja", show_default=True, help="Default locale for this product.")
+@click.option("--market", default="jp", show_default=True, help="Default market for this product.")
+@click.option("--product-id", default=None, help="Stable source-local product id.")
+@click.option("--title", default=None, help="Product title.")
+def curated_product_add(
+    curated_dir: str,
+    source_id: str | None,
+    display_name: str | None,
+    manufacturer: str | None,
+    locale: str,
+    market: str,
+    product_id: str | None,
+    title: str | None,
+) -> None:
+    """Interactively add one product to curated/products/<source-id>.yaml."""
+    cdir = Path(curated_dir)
+    choice_data = _read_curated_choice_data(cdir)
+    source_profile = None if source_id else _select_source_profile(choice_data)
+    source_id = source_id or (source_profile or {}).get("source_id") or click.prompt("数据源 ID", type=str)
+    display_name = (
+        display_name
+        or (source_profile or {}).get("display_name")
+        or click.prompt("显示名称", default=source_id)
+    )
+    manufacturer = (
+        manufacturer
+        or (source_profile or {}).get("manufacturer")
+        or _select_or_enter(
+            "厂商",
+            choice_data.get("manufacturers", []),
+            display_name.upper(),
+        )
+    )
+    if manufacturer is None:
+        raise click.ClickException("厂商不能为空。")
+    locale = (source_profile or {}).get("locale") or locale
+    market = (source_profile or {}).get("market") or market
+    locale = click.prompt("语言/地区代码", default=locale)
+    market = click.prompt("市场", default=market)
+    product_id = product_id or click.prompt("产品 ID", type=str)
+    title = title or click.prompt("产品名称", type=str)
+
+    manufacturer_item_code = _optional_prompt("厂商货号")
+    product_url = _optional_prompt("产品页面 URL")
+    image_url = _optional_prompt("图片 URL")
+    category = _optional_prompt("类别")
+    brand_line = _optional_prompt("产品线")
+    series = _select_or_enter("系列", choice_data.get("series", []))
+    product_series = _optional_prompt("产品系列")
+    release_month = _optional_prompt("发售月份（YYYY-MM）")
+    price_amount_raw = _optional_prompt("价格")
+    price_currency = None
+    price_tax_included = True
+    if price_amount_raw:
+        price_currency = _optional_prompt("货币", "JPY")
+        price_tax_included = click.confirm("价格是否含税？", default=True)
+    scale = _select_or_enter("比例", choice_data.get("scales", []))
+    manual_keys = _split_keys(
+        _optional_prompt("关联说明书 key（多个用英文逗号分隔）")
+    )
+
+    product: dict[str, Any] = {
+        "product_id": product_id,
+        "title": title,
+    }
+    for key, value in (
+        ("manufacturer_item_code", manufacturer_item_code),
+        ("product_url", product_url),
+        ("image_url", image_url),
+        ("category", category),
+        ("brand_line", brand_line),
+        ("series", series),
+        ("product_series", product_series),
+        ("release_month", release_month),
+        ("price_currency", price_currency),
+        ("manual_source_keys", manual_keys),
+    ):
+        if value:
+            product[key] = value
+
+    if price_amount_raw:
+        try:
+            product["price_amount"] = float(price_amount_raw)
+        except ValueError as exc:
+            raise click.ClickException("价格必须是数字。") from exc
+        product["price_tax_included"] = price_tax_included
+
+    if scale:
+        product["specs"] = {"scale": scale}
+
+    path = cdir / "products" / f"{source_id}.yaml"
+    data = _load_yaml_mapping(path)
+    if not data:
+        data = {
+            "source_id": source_id,
+            "display_name": display_name,
+            "manufacturer": manufacturer,
+            "locale": locale,
+            "market": market,
+            "products": [],
+        }
+    else:
+        data.setdefault("source_id", source_id)
+        data.setdefault("display_name", display_name)
+        data.setdefault("manufacturer", manufacturer)
+        data.setdefault("locale", locale)
+        data.setdefault("market", market)
+        data.setdefault("products", [])
+
+    products = data.get("products")
+    if not isinstance(products, list):
+        raise click.ClickException(f"{path} 中的 'products' 必须是列表。")
+    if any(isinstance(existing, dict) and existing.get("product_id") == product_id for existing in products):
+        raise click.ClickException(f"产品 ID '{product_id}' 已存在于 {path}。")
+
+    products.append(product)
+    _write_yaml_mapping(path, data)
+
+    errors = validate_products_yaml(path)
+    if errors:
+        for error in errors:
+            click.echo(f"  - {error}", err=True)
+        raise click.ClickException(f"产品文件校验失败：{path}")
+
+    click.echo(f"已添加产品 '{product_id}' 到 {path}")
 
 
 @curated.command("validate")
@@ -309,8 +662,10 @@ def validate(dist_dir: str) -> None:
         "products.compact.v1.json",
         "products.bandai.v1.json",
         "products.kotobukiya.v1.json",
+        "products.curated.v1.json",
         "product-sources.bandai.v1.json",
         "product-sources.kotobukiya.v1.json",
+        "product-sources.curated.v1.json",
         "relationships.v1.json",
     ]
 

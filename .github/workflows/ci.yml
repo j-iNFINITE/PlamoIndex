@@ -23,6 +23,19 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
 
+    - name: Validate curated data
+      run: plamoindex curated validate curated/
+
+    - name: Build dataset smoke test
+      run: |
+        plamoindex build \
+          --source all \
+          --curated curated/ \
+          --raw data/raw-ci/ \
+          --dist dist-ci/ \
+          --config plamoindex.yml
+        plamoindex validate --dist dist-ci/
+
     - name: Lint with ruff
       run: ruff check src/ tests/
 

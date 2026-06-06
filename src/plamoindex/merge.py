@@ -146,13 +146,13 @@ def merge_product_sources(
     # Build curated mapping lookup: zh_schedule_key -> product_key
     curated_zh_to_product: dict[str, str] = {}
     curated_product_to_zh: dict[str, str] = {}
-    curated_confirmations: dict[str, CuratedMappingEntry] = {}
+    curated_confirmations: list[CuratedMappingEntry] = []
     if curated_mappings:
         for mapping in curated_mappings:
             if mapping.zh_schedule_key and mapping.product_key:
                 curated_zh_to_product[mapping.zh_schedule_key] = mapping.product_key
                 curated_product_to_zh[mapping.product_key] = mapping.zh_schedule_key
-            curated_confirmations[mapping.product_key] = mapping
+            curated_confirmations.append(mapping)
 
     # Group by manufacturer + product_source_id for ja/en merging
     source_groups: dict[str, list[ProductSourceRecord]] = {}
@@ -174,16 +174,21 @@ def merge_product_sources(
 
         if len(sources) == 1:
             source = sources[0]
+            taxonomy = _taxonomy_by_locale_from_source(source)
             product = ProductRecord(
                 product_key=product_key,
                 manufacturer=manufacturer,
-                source_type="automated",
+                source_type=_product_source_type(sources),
                 titles={source.locale: source.title},
                 normalized_titles=(
                     {source.locale: source.normalized_title} if source.normalized_title else None
                 ),
+                manufacturer_item_codes=(
+                    [source.manufacturer_item_code] if source.manufacturer_item_code else None
+                ),
                 source_ids={source.source: source.product_source_id},
                 product_urls={source.locale: source.product_url} if source.product_url else None,
+                taxonomy_by_locale={source.locale: taxonomy} if taxonomy else None,
                 releases=[source.release] if source.release else None,
                 prices=source.prices,
                 provenance=Provenance(
@@ -202,12 +207,18 @@ def merge_product_sources(
             product_urls: dict[str, str] = {}
             releases: list[ReleaseInfo] = []
             prices: list[PriceInfo] = []
+            manufacturer_item_codes: list[str] = []
             taxonomy_by_locale: dict[str, dict[str, Any]] = {}
 
             for source in sources:
                 titles[source.locale] = source.title
                 if source.normalized_title:
                     normalized_titles[source.locale] = source.normalized_title
+                if (
+                    source.manufacturer_item_code
+                    and source.manufacturer_item_code not in manufacturer_item_codes
+                ):
+                    manufacturer_item_codes.append(source.manufacturer_item_code)
                 source_ids[source.source] = source.product_source_id
                 if source.product_url:
                     product_urls[source.locale] = source.product_url
@@ -215,14 +226,9 @@ def merge_product_sources(
                     releases.append(source.release)
                 if source.prices:
                     prices.extend(source.prices)
-                if source.brand_line or source.series:
-                    locale_tax: dict[str, Any] = {}
-                    if source.brand_line:
-                        locale_tax["brand_line"] = source.brand_line
-                    if source.series:
-                        locale_tax["series"] = source.series
-                    if locale_tax:
-                        taxonomy_by_locale[source.locale] = locale_tax
+                locale_tax = _taxonomy_by_locale_from_source(source)
+                if locale_tax:
+                    taxonomy_by_locale[source.locale] = locale_tax
 
             # Check for curated Chinese mapping
             related_product_sources = [s.product_source_key for s in sources]
@@ -232,9 +238,12 @@ def merge_product_sources(
             product = ProductRecord(
                 product_key=product_key,
                 manufacturer=manufacturer,
-                source_type="automated",
+                source_type=_product_source_type(sources),
                 titles=titles,
                 normalized_titles=normalized_titles if normalized_titles else None,
+                manufacturer_item_codes=(
+                    manufacturer_item_codes if manufacturer_item_codes else None
+                ),
                 source_ids=source_ids if source_ids else None,
                 product_urls=product_urls if product_urls else None,
                 releases=releases if releases else None,
@@ -263,7 +272,7 @@ def merge_product_sources(
             product = ProductRecord(
                 product_key=product_key,
                 manufacturer=zh_source.manufacturer,
-                source_type="automated",
+                source_type=_product_source_type([zh_source]),
                 titles={zh_source.locale: zh_source.title},
                 normalized_titles=(
                     {zh_source.locale: zh_source.normalized_title}
@@ -283,7 +292,7 @@ def merge_product_sources(
             )
             products.append(product)
 
-    for mapping in curated_confirmations.values():
+    for mapping in curated_confirmations:
         if mapping.manual_source_key and mapping.product_key:
             relationships.append(_relationship_from_curated_mapping(mapping))
 
@@ -341,7 +350,7 @@ def _merge_into_bandai_product(
     product = ProductRecord(
         product_key=product_key,
         manufacturer=zh_source.manufacturer,
-        source_type="automated",
+        source_type=_product_source_type([zh_source]),
         titles={zh_source.locale: zh_source.title},
         source_ids={zh_source.source: zh_source.product_source_id} if zh_source.source else None,
         releases=[zh_source.release] if zh_source.release else None,
@@ -354,6 +363,30 @@ def _merge_into_bandai_product(
         ),
     )
     products.append(product)
+
+
+def _product_source_type(sources: list[ProductSourceRecord]) -> str:
+    """Determine merged product source_type from contributing product sources."""
+    methods = {source.provenance.collection_method for source in sources}
+    if methods == {"manual"}:
+        return "curated"
+    if "manual" in methods:
+        return "hybrid"
+    return "automated"
+
+
+def _taxonomy_by_locale_from_source(source: ProductSourceRecord) -> dict[str, Any]:
+    """Collect taxonomy refs from a product source for ProductRecord output."""
+    taxonomy: dict[str, Any] = {}
+    if source.category:
+        taxonomy["category"] = source.category
+    if source.brand_line:
+        taxonomy["brand_line"] = source.brand_line
+    if source.series:
+        taxonomy["series"] = source.series
+    if source.product_series:
+        taxonomy["product_series"] = source.product_series
+    return taxonomy
 
 
 def _relationship_from_curated_mapping(mapping: CuratedMappingEntry) -> RelationshipRecord:

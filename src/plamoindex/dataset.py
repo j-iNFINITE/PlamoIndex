@@ -16,6 +16,8 @@ from typing import Any
 
 from plamoindex.config import PlamoIndexConfig
 from plamoindex.curated.loader import (
+    load_all_curated_product_mappings,
+    load_all_curated_product_sources,
     load_all_curated_vendors,
     load_all_mappings,
     load_all_overrides,
@@ -133,6 +135,10 @@ def build_dataset(
         curated_vendors = load_all_curated_vendors(curated_dir)
         curated_overrides = load_all_overrides(curated_dir)
         curated_mappings = load_all_mappings(curated_dir)
+        curated_product_sources = load_all_curated_product_sources(curated_dir)
+        curated_product_mappings = load_all_curated_product_mappings(curated_dir)
+        result.product_sources.extend(curated_product_sources)
+        curated_mappings.extend(curated_product_mappings)
     except Exception as exc:
         result.errors.append(f"Failed to load curated data: {exc}")
         curated_vendors = {}

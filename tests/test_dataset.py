@@ -146,6 +146,70 @@ class TestBuildDataset:
         assert _CountingSource.load_calls == 1
         assert result.manuals[0].manual_source_key == "counting:cached"
 
+    def test_build_includes_curated_product_metadata(self, tmp_path: Path) -> None:
+        curated_dir = tmp_path / "curated"
+        vendors_dir = curated_dir / "vendors"
+        products_dir = curated_dir / "products"
+        vendors_dir.mkdir(parents=True)
+        products_dir.mkdir(parents=True)
+        vendors_dir.joinpath("hasegawa.yaml").write_text(
+            """
+source_id: hasegawa
+display_name: Hasegawa
+records:
+  - manual_source_key: hasegawa:bk-001-manual
+    manual_source_id: bk-001-manual
+    title: VF-1 Manual
+    brand: HASEGAWA
+  - manual_source_key: hasegawa:bk-001-paint
+    manual_source_id: bk-001-paint
+    title: VF-1 Paint Guide
+    brand: HASEGAWA
+""",
+            encoding="utf-8",
+        )
+        products_dir.joinpath("hasegawa.yaml").write_text(
+            """
+source_id: hasegawa
+display_name: Hasegawa
+manufacturer: HASEGAWA
+locale: ja
+market: jp
+products:
+  - product_id: bk-001
+    title: 1/72 VF-1 Valkyrie
+    manufacturer_item_code: BK-001
+    category: plastic model
+    series: Macross
+    release_month: 2026-06
+    price_amount: 3200
+    manual_source_keys:
+      - hasegawa:bk-001-manual
+      - hasegawa:bk-001-paint
+""",
+            encoding="utf-8",
+        )
+
+        result = build_dataset(
+            PlamoIndexConfig(),
+            source_ids=[],
+            curated_dir=curated_dir,
+            raw_dir=tmp_path / "raw",
+            dist_dir=tmp_path / "dist",
+        )
+
+        assert result.success is True
+        assert [p.product_key for p in result.products] == ["hasegawa-product:bk-001"]
+        assert result.products[0].source_type == "curated"
+        assert result.products[0].manufacturer_item_codes == ["BK-001"]
+        assert result.products[0].taxonomy_by_locale is not None
+        assert result.products[0].taxonomy_by_locale["ja"]["series"].label == "Macross"
+        assert len(result.product_sources) == 1
+        assert len(result.relationships) == 2
+        assert result.relationships[0].to_key == "hasegawa-product:bk-001"
+        assert (tmp_path / "dist" / "products.curated.v1.json").is_file()
+        assert (tmp_path / "dist" / "product-sources.curated.v1.json").is_file()
+
 
 class TestWriteDataset:
     def test_write_minimal(self, tmp_path: Path) -> None:

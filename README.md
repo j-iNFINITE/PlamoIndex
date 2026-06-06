@@ -1,200 +1,172 @@
 # plamoindex
 
-**plamoindex** is a Python CLI tool that generates static JSON metadata datasets for plastic model manual sources. It collects manual, product, and relationship metadata from official manufacturer websites and produces structured JSON output files for downstream use.
+`plamoindex` 用来生成塑料模型说明书和产品元数据索引。它会从官方站点采集数据，也支持人工补充其他厂商的产品和说明书信息，最后输出一组静态 JSON 文件，供其他项目读取。
 
-## Features
+当前自动采集来源：
 
-- Collects manual metadata from Bandai (`manual.bandai-hobby.net`) and Kotobukiya (`kotobukiya.co.jp`) official sources.
-- Collects product/schedule metadata from Bandai Japanese, English, and Chinese schedule pages.
-- Collects product metadata from Kotobukiya product detail pages.
-- Merges cross-locale product data (Bandai ja/en by shared product IDs).
-- Supports curated vendor records, overrides, aliases, and product mappings via YAML files.
-- Incremental collection with content-based caching.
-- Polite crawling with configurable delays, jitter, and retry logic.
-- Generates structured JSON output: manuals, products, product sources, relationships, and integrity checksums.
+- Bandai 说明书站
+- Bandai 日文、英文、中文发售表
+- Kotobukiya 说明书和产品页
 
-## Installation
+人工补充来源：
 
-```bash
-pip install plamoindex
-```
+- `curated/vendors/`：补充说明书数据
+- `curated/products/`：补充产品元数据
 
-Or from source:
+## 快速开始
 
-```bash
-git clone <repo-url>
-cd plamoindex
-pip install -e .
-```
-
-For development:
+安装依赖：
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-## Usage
-
-### List source plugins
+查看可用数据源：
 
 ```bash
 plamoindex sources list
 ```
 
-### Collect raw data from sources
-
-```bash
-# Collect from all sources
-plamoindex collect --raw data/raw/
-
-# Collect from a specific source
-plamoindex collect --source bandai --raw data/raw/
-
-# Collect from multiple sources
-plamoindex collect --source bandai --source kotobukiya --raw data/raw/
-```
-
-### Validate curated YAML data
+校验人工维护的数据：
 
 ```bash
 plamoindex curated validate curated/
 ```
 
-### Build dataset from collected and curated data
+采集并构建数据：
 
 ```bash
-plamoindex build --curated curated/ --dist dist/
+plamoindex sync --source all --curated curated/ --raw data/raw/ --dist dist/
 ```
 
-### Collect and build in one step
-
-```bash
-plamoindex sync --source all --curated curated/ --dist dist/
-```
-
-### Validate output
+校验输出：
 
 ```bash
 plamoindex validate --dist dist/
 ```
 
-## GitHub Actions Dataset Build
+## 手动添加产品
 
-This repository includes two GitHub Actions workflows:
+推荐用交互式命令添加产品，减少手写 YAML 的出错概率：
 
-- `.github/workflows/ci.yml` runs `ruff`, `mypy`, and `pytest` on pushes and pull requests.
-- `.github/workflows/build.yml` collects live source data, builds `dist/`, validates checksums, uploads a downloadable artifact, and deploys the static JSON dataset to GitHub Pages.
-
-Before enabling the scheduled build, push the repository to GitHub and run the `Dataset Build` workflow manually from the Actions tab. After the first successful run, enable GitHub Pages with:
-
-1. Open repository `Settings`.
-2. Open `Pages`.
-3. Set `Build and deployment` source to `GitHub Actions`.
-4. Run `Dataset Build` again.
-
-The workflow generates a temporary `plamoindex.github.yml` on the GitHub runner and sets:
-
-```yaml
-dataset:
-  base_url: "https://<owner>.github.io/<repo>"
+```bash
+plamoindex curated product add --curated curated/
 ```
 
-Manual `Dataset Build` runs can also set Bandai schedule backfill inputs:
+命令会询问厂商、产品编号、名称、价格、发售时间、系列、比例、关联说明书等字段，然后写入：
+
+```text
+curated/products/<source_id>.yaml
+```
+
+如果同一个厂商文件已经存在，新产品会追加到现有文件里。生成后命令会自动校验该文件。
+
+如果库里已经有相同厂商、系列或比例，命令会显示编号列表让你直接选择；没有合适选项时，直接输入新值即可。
+
+也可以直接编辑 YAML。示例：
+
+```yaml
+source_id: hasegawa
+display_name: Hasegawa
+manufacturer: HASEGAWA
+locale: ja
+market: jp
+
+products:
+  - product_id: bk-001
+    title: "1/72 VF-1 Valkyrie"
+    manufacturer_item_code: "BK-001"
+    product_url: "https://example.com/products/bk-001"
+    image_url: "https://example.com/products/bk-001.jpg"
+    category: "plastic model"
+    brand_line: "Macross"
+    series: "Macross"
+    release_month: "2026-06"
+    price_amount: 3200
+    price_currency: JPY
+    price_tax_included: true
+    specs:
+      scale: "1/72"
+    manual_source_keys:
+      - hasegawa:bk-001-manual
+```
+
+`manual_source_keys` 是可选字段。填写后，构建时会自动把产品和对应说明书关联起来。
+
+## 手动添加说明书
+
+说明书数据放在：
+
+```text
+curated/vendors/<source_id>.yaml
+```
+
+示例：
+
+```yaml
+source_id: hasegawa
+display_name: Hasegawa
+source_type: curated
+
+records:
+  - manual_source_key: hasegawa:bk-001-manual
+    manual_source_id: bk-001-manual
+    title: "1/72 VF-1 Valkyrie Manual"
+    brand: "HASEGAWA"
+    pdf_url: "https://example.com/manuals/bk-001.pdf"
+    languages: ["ja"]
+```
+
+产品和说明书可以分别添加。只要产品里的 `manual_source_keys` 指向说明书的 `manual_source_key`，最终输出里就会有它们的关系。
+
+## 外部贡献流程
+
+其他人想提交产品数据时，流程很简单：
+
+1. Fork 这个仓库
+2. 新增或修改 `curated/products/*.yaml`
+3. 如有说明书数据，同步新增或修改 `curated/vendors/*.yaml`
+4. 本地运行校验：
+
+```bash
+plamoindex curated validate curated/
+```
+
+5. 提交 Pull Request
+
+PR CI 会自动检查人工数据、运行测试，并做一次不联网的构建校验。贡献者不需要提交 `dist/` 或 `data/raw/`。
+
+## GitHub Actions
+
+仓库里有两个主要 workflow：
+
+- `CI`：在 push 和 Pull Request 时运行，检查测试、类型、lint、人工数据和一次本地构建。
+- `Dataset Build`：手动或定时运行，采集线上数据，合并人工数据，生成最终 `dist/`，并部署到 GitHub Pages。
+
+如果要手动回溯 Bandai 发售表，可以在 `Dataset Build` 的手动运行参数里填写：
 
 ```text
 bandai_schedule_start_month = 198007
 bandai_schedule_end_month   = 202612
 ```
 
-The same configured month window is applied to the Japanese, English, and
-Chinese Bandai schedule pages. When these inputs are omitted, the scheduled
-workflow uses the normal rolling Bandai schedule window instead of crawling the
-full historical archive.
+这个月份范围会同时应用到 Bandai 日文、英文、中文发售表。
 
-The generated dataset will be available at:
+## 输出
 
-```text
-https://<owner>.github.io/<repo>/index.json
-https://<owner>.github.io/<repo>/manuals.latest.json
-https://<owner>.github.io/<repo>/products.latest.json
-```
+构建完成后，主要输出在 `dist/`：
 
-`data/raw/` is cached between workflow runs so incremental collection can reuse previous manifests and records. `dist/` and `data/raw/` should remain uncommitted; both are generated by the workflow.
+- `manuals.latest.json`：说明书数据
+- `products.latest.json`：产品数据
+- `relationships.v1.json`：说明书和产品的关系
+- `index.json`：数据集索引和文件入口
+- `checksums.json`：文件校验值
 
-## Configuration
+还有按来源拆分的文件，例如 Bandai、Kotobukiya、curated 产品文件。下游项目通常从 `index.json` 开始读取即可。
 
-The runtime configuration file `plamoindex.yml` controls HTTP settings, source delays, data paths, and dataset metadata:
+## 本地开发检查
 
-```yaml
-schema_version: 1
-http:
-  timeout_seconds: 30
-  retry_count: 3
-  delay_seconds: 1.0
-  user_agent: "plamoindex/0.1 (+https://github.com/plamoindex/plamoindex)"
-sources:
-  bandai:
-    enabled: true
-    delay_seconds: 1.0
-    schedule_past_months: 3
-    schedule_future_months: 6
-    # Optional historical backfill range. Omit these for the rolling window.
-    # schedule_start_month: "198007"
-    # schedule_end_month: "202612"
-  kotobukiya:
-    enabled: true
-    delay_seconds: 1.0
-curated:
-  path: curated/
-raw:
-  path: data/raw/
-output:
-  dist: dist/
-  compact: true
-dataset:
-  base_url: "https://manuals.example.com"
-```
-
-Collection status counts are record counts, not crawled page counts. For
-example, `bandai.product_sources: 363` means 363 Bandai product-source records
-were collected from the configured schedule window; it does not mean 363
-schedule pages were crawled.
-
-## Output Files
-
-The `build` or `sync` command produces the following files in the `dist/` directory:
-
-| File | Description |
-|------|-------------|
-| `index.json` | Dataset index with version, counts, and source statuses |
-| `schema.v1.json` | JSON Schema for ManualRecord |
-| `manuals.latest.json` | All manual records (full) |
-| `manuals.compact.v1.json` | Compact manual records (downstream search) |
-| `manuals.bandai.v1.json` | Bandai manual records |
-| `manuals.kotobukiya.v1.json` | Kotobukiya manual records |
-| `manuals.curated.v1.json` | Curated manual records |
-| `products.latest.json` | All merged product records |
-| `products.compact.v1.json` | Compact product records |
-| `products.bandai.v1.json` | Bandai product records |
-| `products.kotobukiya.v1.json` | Kotobukiya product records |
-| `product-sources.bandai.v1.json` | Bandai product source records |
-| `product-sources.kotobukiya.v1.json` | Kotobukiya product source records |
-| `relationships.v1.json` | Relationship records (manual-product links) |
-| `sources.json` | Per-source collection status |
-| `checksums.json` | SHA-256 checksums of all output files |
-
-## Identity Key Conventions
-
-| Key Type | Format | Example |
-|----------|--------|---------|
-| Manual | `{source}:{source_id}` | `bandai:5119` |
-| Product Source | `{source-family}:{locale}:{id}` | `bandai-schedule:en:01_7017` |
-| Merged Product | `{manufacturer}-product:{stable_id}` | `bandai-product:01_7017` |
-| Relationship | `rel:{type}:{from}:{to}` | `rel:manual-product:bandai:5119:bandai-product:01_7017` |
-
-## Development
-
-### Quality Gate
+修改代码后运行：
 
 ```bash
 ruff check src/ tests/
@@ -202,14 +174,12 @@ mypy src/
 python -m pytest
 ```
 
-### Test Suite
-
-Tests use temporary directories and fixture data -- no live network access required.
+只改人工数据时，至少运行：
 
 ```bash
-python -m pytest -v
+plamoindex curated validate curated/
 ```
 
-## License
+## 许可证
 
 MIT
