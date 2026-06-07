@@ -176,6 +176,16 @@ bandai_schedule_max_months_per_run = 36
 
 还有按来源拆分的文件，例如 Bandai、Kotobukiya、curated 产品文件。下游项目通常从 `index.json` 开始读取即可。
 
+## 数据使用注意事项
+
+说明书和产品是两类不同的数据，不要混在一起去重：
+
+- `manuals.latest.json` 和 compact 说明书数据：用 `manual_source_key` 去重。
+- `products.latest.json`：用 `product_key` 去重。
+- `relationships.v1.json`：负责连接说明书和产品，用 `from_key`、`to_key` 和 `relationship` 表达关系。
+
+不要用 `product_key` 去重说明书。一个产品可能有多份官方说明书，例如不同语言版本；这些说明书应该保留为多条 manual，再通过 relationships 指向同一个 product。
+
 ## 本地开发检查
 
 修改代码后运行：
