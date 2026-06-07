@@ -15,13 +15,23 @@ from plamoindex.models.manual import ManualRecord
 from plamoindex.models.product import ProductRecord, ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
 from plamoindex.models.shared import Provenance
-from plamoindex.output.writer import write_dataset
+from plamoindex.output.writer import CHECKSUMMED_DATASET_FILES, PUBLISHED_DATASET_FILES, write_dataset
 from plamoindex.sources.base import SourceCollection, SourcePlugin
 from plamoindex.sources.registry import register_builtin, reset
 
 
 def _make_provenance() -> Provenance:
     return Provenance(collector="test", collection_method="test", collected_at=datetime(2026, 6, 6))
+
+
+def _index_file_paths(files: dict[str, object]) -> set[str]:
+    paths: set[str] = set()
+    for value in files.values():
+        if isinstance(value, str):
+            paths.add(value.lstrip("/"))
+        elif isinstance(value, dict):
+            paths.update(_index_file_paths(value))
+    return paths
 
 
 class _CountingSource(SourcePlugin):
@@ -228,6 +238,28 @@ class TestWriteDataset:
         assert (dist_dir / "sources.json").is_file()
         assert (dist_dir / "checksums.json").is_file()
         assert index["counts"]["total"] == 0
+
+    def test_published_file_contract_is_consistent(self, tmp_path: Path) -> None:
+        dist_dir = tmp_path / "dist"
+        index = write_dataset(
+            dist_dir=dist_dir,
+            manuals=[],
+            product_sources=[],
+            products=[],
+            relationships=[],
+        )
+
+        written_files = {path.name for path in dist_dir.iterdir() if path.is_file()}
+        assert written_files == set(PUBLISHED_DATASET_FILES)
+        assert _index_file_paths(index["files"]) == set(PUBLISHED_DATASET_FILES)
+
+        with open(dist_dir / "checksums.json", encoding="utf-8") as f:
+            checksums = json.load(f)
+        assert set(checksums) == set(CHECKSUMMED_DATASET_FILES)
+
+        result = CliRunner().invoke(main, ["validate", "--dist", str(dist_dir)])
+
+        assert result.exit_code == 0, result.output
 
     def test_write_with_manuals(self, tmp_path: Path) -> None:
         dist_dir = tmp_path / "dist"

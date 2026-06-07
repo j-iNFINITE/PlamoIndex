@@ -16,6 +16,11 @@ class ValidationError(Exception):
 
 
 _ALLOWED_MAPPING_STATUSES = {"confirmed", "matched", "candidate", "rejected", "unmapped"}
+_ALLOWED_RELEASE_PRECISIONS = {"day", "month", "year", "unknown"}
+_MANUAL_SOURCE_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*:[a-zA-Z0-9_.-]+$")
+_PRODUCT_SOURCE_KEY_RE = re.compile(
+    r"^[a-z][a-z0-9_-]*:[a-z]{2,}(-[A-Z][a-z]+)?:[a-zA-Z0-9_.-]+$"
+)
 
 
 def validate_vendor_yaml(path: Path) -> list[str]:
@@ -111,19 +116,20 @@ def validate_products_yaml(path: Path) -> list[str]:
         errors.append(f"'products' must be a list in {path}")
         return errors
 
-    seen_keys: set[str] = set()
+    seen_keys: dict[str, int] = {}
     file_source_id = str(data.get("source_id", ""))
     file_locale = str(data.get("locale", "ja"))
     for i, product in enumerate(products):
+        product_path = f"products[{i}]"
         if not isinstance(product, dict):
-            errors.append(f"Product {i} is not a mapping in {path}")
+            errors.append(f"{product_path} must be a mapping in {path}")
             continue
 
         product_id = product.get("product_id")
         if not product_id:
-            errors.append(f"Product {i} missing 'product_id' in {path}")
+            errors.append(f"{product_path}.product_id is required in {path}")
         if "title" not in product:
-            errors.append(f"Product '{product_id}' missing required field 'title' in {path}")
+            errors.append(f"{product_path}.title is required for product_id {product_id!r} in {path}")
 
         locale = str(product.get("locale", file_locale))
         product_source_id = str(product.get("product_source_id", product_id or ""))
@@ -132,46 +138,70 @@ def validate_products_yaml(path: Path) -> list[str]:
             or f"{file_source_id}-product:{locale}:{product_source_id}"
         )
         if product_source_key in seen_keys:
-            errors.append(f"Duplicate product_source_key '{product_source_key}' in {path}")
-        seen_keys.add(product_source_key)
+            errors.append(
+                f"{product_path}.product_source_key duplicates products[{seen_keys[product_source_key]}] "
+                f"with value {product_source_key!r} in {path}"
+            )
+        else:
+            seen_keys[product_source_key] = i
+        if product_source_key and not _PRODUCT_SOURCE_KEY_RE.fullmatch(product_source_key):
+            errors.append(
+                f"{product_path}.product_source_key has invalid value {product_source_key!r} "
+                f"(expected source-family:locale:id, e.g. hasegawa-product:ja:bk-001) in {path}"
+            )
 
         release_date = product.get("release_date")
         if release_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(release_date)):
             errors.append(
-                f"Product '{product_id}' has invalid release_date "
-                f"(expected YYYY-MM-DD) in {path}"
+                f"{product_path}.release_date has invalid value {release_date!r} "
+                f"(expected YYYY-MM-DD, e.g. 2026-06-30) in {path}"
             )
         release_month = product.get("release_month")
         if release_month and not re.fullmatch(r"\d{4}-\d{2}", str(release_month)):
             errors.append(
-                f"Product '{product_id}' has invalid release_month "
-                f"(expected YYYY-MM) in {path}"
+                f"{product_path}.release_month has invalid value {release_month!r} "
+                f"(expected YYYY-MM, e.g. 2026-06) in {path}"
+            )
+        precision = product.get("release_date_precision")
+        if precision is not None and str(precision) not in _ALLOWED_RELEASE_PRECISIONS:
+            errors.append(
+                f"{product_path}.release_date_precision has invalid value {precision!r} "
+                f"(expected one of: day, month, year, unknown) in {path}"
+            )
+        effective_precision = str(precision) if precision is not None else None
+        if effective_precision is None and release_date:
+            effective_precision = "day"
+        elif effective_precision is None and release_month:
+            effective_precision = "month"
+        if effective_precision == "day" and not release_date:
+            errors.append(f"{product_path}.release_date is required when release_date_precision is 'day' in {path}")
+        if effective_precision in {"day", "month"} and not release_month:
+            errors.append(
+                f"{product_path}.release_month is required when release_date_precision is "
+                f"{effective_precision!r} in {path}"
             )
 
         if "price_amount" in product:
-            _validate_numeric(errors, product["price_amount"], f"Product '{product_id}' price_amount", path)
+            _validate_numeric(errors, product["price_amount"], f"{product_path}.price_amount", path)
 
         prices = product.get("prices", [])
         if prices is None:
             prices = []
         if not isinstance(prices, list):
-            errors.append(f"Product '{product_id}' prices must be a list in {path}")
+            errors.append(f"{product_path}.prices must be a list in {path}")
         else:
             for price_index, price in enumerate(prices):
+                price_path = f"{product_path}.prices[{price_index}]"
                 if not isinstance(price, dict):
-                    errors.append(
-                        f"Product '{product_id}' price {price_index} is not a mapping in {path}"
-                    )
+                    errors.append(f"{price_path} must be a mapping in {path}")
                     continue
                 if "amount" not in price:
-                    errors.append(
-                        f"Product '{product_id}' price {price_index} missing amount in {path}"
-                    )
+                    errors.append(f"{price_path}.amount is required in {path}")
                 else:
                     _validate_numeric(
                         errors,
                         price["amount"],
-                        f"Product '{product_id}' price {price_index} amount",
+                        f"{price_path}.amount",
                         path,
                     )
 
@@ -179,13 +209,14 @@ def validate_products_yaml(path: Path) -> list[str]:
         if manual_source_keys is None:
             manual_source_keys = []
         if not isinstance(manual_source_keys, list):
-            errors.append(f"Product '{product_id}' manual_source_keys must be a list in {path}")
+            errors.append(f"{product_path}.manual_source_keys must be a list in {path}")
         else:
-            for manual_key in manual_source_keys:
-                if ":" not in str(manual_key):
+            for manual_index, manual_key in enumerate(manual_source_keys):
+                manual_path = f"{product_path}.manual_source_keys[{manual_index}]"
+                if not isinstance(manual_key, str) or not _MANUAL_SOURCE_KEY_RE.fullmatch(manual_key):
                     errors.append(
-                        f"Product '{product_id}' manual_source_key '{manual_key}' "
-                        f"must use source:id format in {path}"
+                        f"{manual_path} has invalid value {manual_key!r} "
+                        f"(expected source:id, e.g. hasegawa:bk-001-manual) in {path}"
                     )
 
     return errors
@@ -253,7 +284,7 @@ def _validate_numeric(
     try:
         float(value)
     except (TypeError, ValueError):
-        errors.append(f"{label} must be numeric in {path}")
+        errors.append(f"{label} must be numeric (got {value!r}) in {path}")
 
 
 def validate_mappings_yaml(path: Path) -> list[str]:

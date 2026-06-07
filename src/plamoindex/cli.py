@@ -21,9 +21,16 @@ import yaml
 
 from plamoindex import __version__
 from plamoindex.config import load_config
+from plamoindex.curated.loader import (
+    curated_product_entry_to_mappings,
+    curated_product_entry_to_product_source_record,
+    load_curated_products,
+)
 from plamoindex.curated.validator import validate_curated_directory, validate_products_yaml
 from plamoindex.dataset import build_dataset, collect_sources
+from plamoindex.merge import merge_product_sources
 from plamoindex.output.checksums import sha256_hex
+from plamoindex.output.writer import CHECKSUMMED_DATASET_FILES, PUBLISHED_DATASET_FILES
 from plamoindex.sources.registry import get_source, list_sources
 
 
@@ -256,6 +263,33 @@ def _write_yaml_mapping(path: Path, data: dict[str, Any]) -> None:
         yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
 
 
+def _show_curated_product_summary(path: Path, product_id: str) -> None:
+    """Show the generated keys and mappings for a newly-added curated product."""
+    product_file = load_curated_products(path)
+    matching_entries = [
+        entry for entry in product_file.products if entry.product_id == product_id
+    ]
+    if not matching_entries:
+        return
+
+    entry = matching_entries[-1]
+    product_source = curated_product_entry_to_product_source_record(entry, product_file)
+    products, _ = merge_product_sources([product_source])
+    product_key = products[0].product_key if products else "<unknown>"
+    mappings = curated_product_entry_to_mappings(entry, product_file)
+
+    click.echo("写入摘要：")
+    click.echo(f"  文件: {path}")
+    click.echo(f"  product_source_key: {product_source.product_source_key}")
+    click.echo(f"  product_key: {product_key}")
+    if mappings:
+        click.echo(f"  manual mappings: {len(mappings)}")
+        for mapping in mappings:
+            click.echo(f"    {mapping.manual_source_key} -> {mapping.product_key}")
+    else:
+        click.echo("  manual mappings: 0")
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="plamoindex")
 def main() -> None:
@@ -478,6 +512,7 @@ def curated_product_add(
         raise click.ClickException(f"产品文件校验失败：{path}")
 
     click.echo(f"已添加产品 '{product_id}' 到 {path}")
+    _show_curated_product_summary(path, str(product_id))
 
 
 @curated.command("validate")
@@ -648,28 +683,7 @@ def validate(dist_dir: str) -> None:
     """Validate an existing dist directory."""
     ddir = Path(dist_dir)
 
-    expected_files = [
-        "index.json",
-        "schema.v1.json",
-        "manuals.latest.json",
-        "manuals.compact.v1.json",
-        "manuals.bandai.v1.json",
-        "manuals.kotobukiya.v1.json",
-        "manuals.curated.v1.json",
-        "sources.json",
-        "checksums.json",
-        "products.latest.json",
-        "products.compact.v1.json",
-        "products.bandai.v1.json",
-        "products.kotobukiya.v1.json",
-        "products.curated.v1.json",
-        "product-sources.bandai.v1.json",
-        "product-sources.kotobukiya.v1.json",
-        "product-sources.curated.v1.json",
-        "relationships.v1.json",
-    ]
-
-    missing = [fn for fn in expected_files if not (ddir / fn).is_file()]
+    missing = [fn for fn in PUBLISHED_DATASET_FILES if not (ddir / fn).is_file()]
 
     if missing:
         click.echo("Missing files:", err=True)
@@ -712,15 +726,13 @@ def validate(dist_dir: str) -> None:
         click.echo(f"Invalid checksums.json: {exc}", err=True)
         sys.exit(1)
 
-    # checksums.json cannot contain its own hash, so exclude it from the check
-    files_with_checksum = [fn for fn in expected_files if fn != "checksums.json"]
-    missing_checksums = [fn for fn in files_with_checksum if fn not in checksums]
+    missing_checksums = [fn for fn in CHECKSUMMED_DATASET_FILES if fn not in checksums]
     if missing_checksums:
         click.echo(f"Missing checksums for: {missing_checksums}", err=True)
         sys.exit(1)
 
     mismatched_checksums = []
-    for fn in files_with_checksum:
+    for fn in CHECKSUMMED_DATASET_FILES:
         actual = sha256_hex(ddir / fn)
         expected = checksums.get(fn)
         if expected != actual:
@@ -731,7 +743,7 @@ def validate(dist_dir: str) -> None:
         sys.exit(1)
 
     # Validate each JSON file is valid
-    for fn in expected_files:
+    for fn in PUBLISHED_DATASET_FILES:
         try:
             with open(ddir / fn, encoding="utf-8") as fh:
                 json.load(fh)

@@ -17,6 +17,31 @@ from plamoindex.models.product import ProductRecord, ProductSourceRecord
 from plamoindex.models.relationship import RelationshipRecord
 from plamoindex.output.checksums import compute_checksums
 
+PUBLISHED_DATASET_FILES = (
+    "index.json",
+    "schema.v1.json",
+    "manuals.latest.json",
+    "manuals.compact.v1.json",
+    "manuals.bandai.v1.json",
+    "manuals.kotobukiya.v1.json",
+    "manuals.curated.v1.json",
+    "sources.json",
+    "checksums.json",
+    "products.latest.json",
+    "products.compact.v1.json",
+    "products.bandai.v1.json",
+    "products.kotobukiya.v1.json",
+    "products.curated.v1.json",
+    "product-sources.bandai.v1.json",
+    "product-sources.kotobukiya.v1.json",
+    "product-sources.curated.v1.json",
+    "relationships.v1.json",
+)
+
+CHECKSUMMED_DATASET_FILES = tuple(
+    file_name for file_name in PUBLISHED_DATASET_FILES if file_name != "checksums.json"
+)
+
 
 def _pydantic_to_dict(obj: Any) -> Any:
     """Serialize a Pydantic model or list of models to a JSON-compatible dict.
@@ -198,11 +223,13 @@ def write_dataset(
         "generated_at": generated_at,
         "base_url": base_url,
         "files": {
+            "index": "/index.json",
             "full": "/manuals.latest.json",
             "compact": "/manuals.compact.v1.json",
             "bandai": "/manuals.bandai.v1.json",
             "kotobukiya": "/manuals.kotobukiya.v1.json",
             "curated": "/manuals.curated.v1.json",
+            "sources": "/sources.json",
             "schema": "/schema.v1.json",
             "checksums": "/checksums.json",
             "products": {
@@ -235,26 +262,7 @@ def write_dataset(
     # Compute checksums for all published files (excluding checksums.json itself,
     # which cannot contain its own hash). index.json is included since it was
     # written above.
-    dist_files = [
-        "index.json",
-        "manuals.latest.json",
-        "manuals.compact.v1.json",
-        "manuals.bandai.v1.json",
-        "manuals.kotobukiya.v1.json",
-        "manuals.curated.v1.json",
-        "sources.json",
-        "schema.v1.json",
-        "products.latest.json",
-        "products.compact.v1.json",
-        "products.bandai.v1.json",
-        "products.kotobukiya.v1.json",
-        "products.curated.v1.json",
-        "product-sources.bandai.v1.json",
-        "product-sources.kotobukiya.v1.json",
-        "product-sources.curated.v1.json",
-        "relationships.v1.json",
-    ]
-    checksums = compute_checksums(dist_dir, dist_files)
+    checksums = compute_checksums(dist_dir, list(CHECKSUMMED_DATASET_FILES))
     _write_json(dist_dir / "checksums.json", checksums)
 
     return index_data

@@ -295,6 +295,40 @@ class TestCuratedValidator:
         assert any("price_amount" in error for error in errors)
         assert any("manual_source_key" in error for error in errors)
 
+    def test_validate_products_yaml_reports_field_paths_and_examples(self, tmp_path: Path) -> None:
+        path = tmp_path / "bad-details.yaml"
+        path.write_text(yaml.dump({
+            "source_id": "hasegawa",
+            "display_name": "Hasegawa",
+            "manufacturer": "HASEGAWA",
+            "products": [
+                {
+                    "product_id": "bad",
+                    "title": "Bad Product",
+                    "product_source_key": "not-a-valid-key",
+                    "release_date_precision": "day",
+                    "prices": [
+                        {"currency": "JPY"},
+                        {"amount": "free"},
+                    ],
+                    "manual_source_keys": [123],
+                }
+            ],
+        }))
+
+        errors = validate_products_yaml(path)
+
+        assert any("products[0].product_source_key" in error and "source-family:locale:id" in error for error in errors)
+        assert any("products[0].release_date is required" in error for error in errors)
+        assert any("products[0].release_month is required" in error for error in errors)
+        assert any("products[0].prices[0].amount is required" in error for error in errors)
+        assert any("products[0].prices[1].amount must be numeric" in error and "'free'" in error for error in errors)
+        assert any(
+            "products[0].manual_source_keys[0]" in error
+            and "hasegawa:bk-001-manual" in error
+            for error in errors
+        )
+
     def test_validate_overrides_missing_target(self, tmp_path: Path) -> None:
         path = tmp_path / "overrides.yaml"
         path.write_text(yaml.dump({
@@ -450,6 +484,11 @@ class TestCuratedProductCli:
         assert "语言/地区代码" in result.output
         assert "产品页面 URL" in result.output
         assert "已添加产品 'bk-001'" in result.output
+        assert "写入摘要" in result.output
+        assert "product_source_key: hasegawa-product:ja:bk-001" in result.output
+        assert "product_key: hasegawa-product:bk-001" in result.output
+        assert "manual mappings: 1" in result.output
+        assert "hasegawa:bk-001-manual -> hasegawa-product:bk-001" in result.output
         product_file = curated_dir / "products" / "hasegawa.yaml"
         assert product_file.is_file()
         data = yaml.safe_load(product_file.read_text(encoding="utf-8"))
@@ -523,6 +562,9 @@ class TestCuratedProductCli:
         assert "系列（输入编号选择已有项，或输入新值）" in result.output
         assert "已有比例" in result.output
         assert "比例（输入编号选择已有项，或输入新值）" in result.output
+        assert "product_source_key: wave-product:ja:mk-002" in result.output
+        assert "product_key: wave-product:mk-002" in result.output
+        assert "manual mappings: 0" in result.output
         product_file = curated_dir / "products" / "wave.yaml"
         data = yaml.safe_load(product_file.read_text(encoding="utf-8"))
         product = data["products"][0]
