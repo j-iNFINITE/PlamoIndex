@@ -8,6 +8,7 @@ import pytest
 
 from plamoindex.collector import CollectionResult, CollectorCache
 from plamoindex.fetch import FetchResult
+from plamoindex.sources.bandai import _product_source_dict_to_record
 from plamoindex.sources.bandai_manual import BandaiManualCollector
 from plamoindex.sources.bandai_manual import _parse_list_page as parse_bandai_manual_list
 from plamoindex.sources.bandai_schedule import (
@@ -186,6 +187,18 @@ class TestBandaiManualPagination:
 
 
 class TestBandaiScheduleWindow:
+    def test_product_source_conversion_strips_source_id_whitespace(self) -> None:
+        record = _product_source_dict_to_record({
+            "source": "bandai_schedule_ja",
+            "locale": "ja",
+            "product_id": "item-1000112530 ",
+            "title": "Test Product",
+            "collected_at": "2026-06-06T00:00:00+00:00",
+        })
+
+        assert record.product_source_key == "bandai-schedule:ja:item-1000112530"
+        assert record.product_source_id == "item-1000112530"
+
     def test_explicit_month_range_overrides_rolling_window(self, tmp_path: Path) -> None:
         cache = CollectorCache(tmp_path, "bandai_schedule")
         collector = BandaiScheduleCollector(

@@ -503,16 +503,21 @@ def _raw_product_source_key(record: dict[str, Any]) -> str | None:
     """Return a stable key for a raw Bandai schedule product source."""
     source = record.get("source")
     locale = record.get("locale")
-    source_id = (
+    source_id_raw = (
         record.get("product_source_id")
         or record.get("product_id")
         or record.get("cn_id")
     )
+    source_id = str(source_id_raw).strip() if source_id_raw is not None else ""
     if not source_id:
         return None
     return ":".join(
         str(part)
-        for part in (source or "bandai_schedule", locale or "", source_id)
+        for part in (
+            str(source).strip() if source else "bandai_schedule",
+            str(locale).strip() if locale else "",
+            source_id,
+        )
     )
 
 
@@ -554,7 +559,7 @@ def _parse_ja_card(item: Tag, year_month: str) -> dict[str, Any] | None:
     pid_match = re.search(r"/item/([^/?#]+)/?", href)
     if not pid_match:
         return None
-    product_id = pid_match.group(1)
+    product_id = pid_match.group(1).strip()
 
     title_elem = item.select_one(".p-card__tit")
     img = item.find("img")
@@ -667,7 +672,7 @@ def _parse_en_card(item: Tag, year_month: str) -> dict[str, Any] | None:
     pid_match = re.search(r"/item/([^/?#]+)/?", href)
     if not pid_match:
         return None
-    product_id = pid_match.group(1)
+    product_id = pid_match.group(1).strip()
 
     title_elem = item.select_one(".p-card__tit")
     img = item.find("img")
@@ -781,7 +786,7 @@ def _parse_zh_card(item: Tag, year_month: str | None = None) -> dict[str, Any] |
         cn_id_match = re.search(r"id=(\d+)", href)
     if not cn_id_match:
         return None
-    cn_id = cn_id_match.group(1)
+    cn_id = cn_id_match.group(1).strip()
 
     title_elem = item.select_one(".p-card__tit")
     img = item.find("img")

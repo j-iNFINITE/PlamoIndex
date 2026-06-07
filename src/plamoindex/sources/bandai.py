@@ -243,8 +243,8 @@ def _manual_dict_to_record(d: dict[str, Any]) -> ManualRecord:
 
 def _product_source_dict_to_record(d: dict[str, Any]) -> ProductSourceRecord:
     """Convert a collector dict to a ProductSourceRecord."""
-    locale = d.get("locale", "en")
-    source_id = d.get("product_id", d.get("cn_id", ""))
+    locale = str(d.get("locale", "en")).strip()
+    source_id = str(d.get("product_id", d.get("cn_id", ""))).strip()
     source_name = d.get("source", f"bandai_schedule_{locale}")
 
     # Build product source key
