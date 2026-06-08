@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from plamoindex.curated.loader import CuratedMappingEntry, CuratedOverrideEntry
 from plamoindex.models.manual import ManualRecord
@@ -429,45 +429,37 @@ def infer_manual_product_relationships(
     }
     products_by_key = {product.product_key: product for product in products}
     manuals_by_key = {manual.manual_source_key: manual for manual in manuals}
+    bandai_products = [
+        product for product in products if product.manufacturer == "BANDAI SPIRITS"
+    ]
 
     for manual in manuals:
         if manual.source != "bandai":
             continue
 
-        manual_ja = _localized_title(manual, "ja") or manual.title
-        manual_en = _localized_title(manual, "en") or manual.title_en
-        norm_manual_ja = _normalize_match_title(manual_ja)
-        norm_manual_en = _normalize_match_title(manual_en)
-        if not norm_manual_ja or not norm_manual_en:
-            continue
-
-        for product in products:
-            if product.manufacturer != "BANDAI SPIRITS":
+        for product in bandai_products:
+            matched_fields = _manual_product_title_matches(manual, product)
+            if not matched_fields:
                 continue
-
-            product_ja = product.titles.get("ja")
-            product_en = product.titles.get("en")
-            if (
-                norm_manual_ja == _normalize_match_title(product_ja)
-                and norm_manual_en == _normalize_match_title(product_en)
-            ):
-                rel = _make_manual_product_relationship(
-                    manual=manual,
-                    product=product,
-                    status="matched",
-                    method="official_bilingual_title_match",
-                    confidence=0.97,
-                    matched_fields=[
-                        "manual.localized_titles.ja",
-                        "manual.title_en",
-                        "product.titles.ja",
-                        "product.titles.en",
-                    ],
-                )
-                if rel.relationship_key not in existing_keys:
-                    relationships.append(rel)
-                    existing_keys.add(rel.relationship_key)
-                _attach_embedded_relationship(manual, product, rel)
+            matched_locales = _matched_title_locales(matched_fields)
+            method = (
+                "official_bilingual_title_match"
+                if matched_locales == {"ja", "en"}
+                else f"official_{next(iter(matched_locales))}_title_match"
+            )
+            confidence = 0.97 if matched_locales == {"ja", "en"} else 0.93
+            rel = _make_manual_product_relationship(
+                manual=manual,
+                product=product,
+                status="matched",
+                method=method,
+                confidence=confidence,
+                matched_fields=matched_fields,
+            )
+            if rel.relationship_key not in existing_keys:
+                relationships.append(rel)
+                existing_keys.add(rel.relationship_key)
+            _attach_embedded_relationship(manual, product, rel)
 
     for mapping in curated_mappings or []:
         if not mapping.manual_source_key:
@@ -490,6 +482,92 @@ def _localized_title(manual: ManualRecord, locale: str) -> str | None:
     if manual.localized_titles:
         return manual.localized_titles.get(locale)
     return None
+
+
+def _manual_product_title_matches(
+    manual: ManualRecord,
+    product: ProductRecord,
+) -> list[str]:
+    """Return title fields where manual and product match by the same locale."""
+    matched_fields: list[str] = []
+    for locale in ("ja", "en"):
+        manual_fields = _manual_title_match_values(manual, locale)
+        product_fields = _product_title_match_values(product, locale)
+        for manual_field, manual_value in manual_fields:
+            for product_field, product_value in product_fields:
+                if manual_value and manual_value == product_value:
+                    matched_fields.extend([manual_field, product_field])
+                    break
+            if matched_fields and matched_fields[-2] == manual_field:
+                break
+    return matched_fields
+
+
+def _matched_title_locales(matched_fields: list[str]) -> set[str]:
+    """Return locales represented by matched manual title fields."""
+    locales: set[str] = set()
+    for field in matched_fields:
+        if not field.startswith("manual."):
+            continue
+        if field == "manual.title":
+            locales.add("ja")
+        elif field == "manual.title_en":
+            locales.add("en")
+        else:
+            locales.add(field.rsplit(".", 1)[-1])
+    return locales
+
+
+def _manual_title_match_values(
+    manual: ManualRecord,
+    locale: str,
+) -> list[tuple[str, str]]:
+    """Return comparable manual title values for one locale."""
+    values: list[tuple[str, str]] = []
+    normalized_title = _normalized_title_for_locale(manual.normalized_titles, locale)
+    if normalized_title:
+        values.append((f"manual.normalized_titles.{locale}", normalized_title))
+
+    title = _localized_title(manual, locale)
+    field = f"manual.localized_titles.{locale}"
+    if locale == "ja" and not title:
+        title = manual.title
+        field = "manual.title"
+    elif locale == "en" and not title:
+        title = manual.title_en
+        field = "manual.title_en"
+    normalized_title = _normalize_match_title(title)
+    if normalized_title:
+        values.append((field, normalized_title))
+    return values
+
+
+def _product_title_match_values(
+    product: ProductRecord,
+    locale: str,
+) -> list[tuple[str, str]]:
+    """Return comparable product title values for one locale."""
+    values: list[tuple[str, str]] = []
+    normalized_title = _normalized_title_for_locale(product.normalized_titles, locale)
+    if normalized_title:
+        values.append((f"product.normalized_titles.{locale}", normalized_title))
+    normalized_title = _normalize_match_title(product.titles.get(locale))
+    if normalized_title:
+        values.append((f"product.titles.{locale}", normalized_title))
+    return values
+
+
+def _normalized_title_for_locale(
+    normalized_titles: Mapping[str, str | None] | None,
+    locale: str,
+) -> str:
+    """Return a comparable normalized title from schema-normalized fields."""
+    if not normalized_titles:
+        return ""
+    title = normalized_titles.get(locale)
+    if not title:
+        return ""
+    return "".join(title.split()).casefold()
 
 
 def _normalize_match_title(title: str | None) -> str:

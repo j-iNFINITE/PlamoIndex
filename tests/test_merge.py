@@ -261,6 +261,78 @@ class TestMergeProductSources:
         assert manual.related_products is not None
         assert products[0].related_manuals is not None
 
+    def test_infers_bandai_normalized_ja_manual_product_relationship(self) -> None:
+        manual = ManualRecord(
+            manual_source_key="bandai:5083",
+            source="bandai",
+            manual_source_id="5083",
+            title="HG 1/144 ゲルググ(GQ)",
+            title_en="HG 1/144 GELGOOG(GQ)",
+            localized_titles={
+                "ja": "HG 1/144 ゲルググ(GQ)",
+                "en": "HG 1/144 GELGOOG(GQ)",
+            },
+            normalized_titles={
+                "ja": "hg1/144ゲルググ(gq)",
+                "en": "hg1/144gelgoog(gq)",
+            },
+            brand="BANDAI SPIRITS",
+            provenance=_make_provenance(),
+        )
+        ja = _make_product_source(
+            "bandai-schedule:ja:01_7158",
+            locale="ja",
+            source="bandai_schedule_ja",
+            pid="01_7158",
+        )
+        ja.title = "HG 1/144 ゲルググ(GQ)"
+        ja.normalized_title = "hg1/144ゲルググ(gq)"
+        products, existing_rels = merge_product_sources([ja])
+
+        rels = infer_manual_product_relationships([manual], products, existing_relationships=existing_rels)
+
+        assert len(rels) == 1
+        assert rels[0].relationship_key == "rel:manual-product:bandai:5083:bandai-product:01_7158"
+        assert rels[0].method == "official_ja_title_match"
+        assert manual.related_products is not None
+        assert products[0].related_manuals is not None
+
+    def test_infers_bandai_en_manual_product_relationship(self) -> None:
+        manual = ManualRecord(
+            manual_source_key="bandai:6001",
+            source="bandai",
+            manual_source_id="6001",
+            title="Different Japanese Title",
+            title_en="HG 1/144 GELGOOG(GQ)",
+            localized_titles={
+                "ja": "Different Japanese Title",
+                "en": "HG 1/144 GELGOOG(GQ)",
+            },
+            normalized_titles={
+                "ja": "differentjapanesetitle",
+                "en": "hg1/144gelgoog(gq)",
+            },
+            brand="BANDAI SPIRITS",
+            provenance=_make_provenance(),
+        )
+        en = _make_product_source(
+            "bandai-schedule:en:01_7158",
+            locale="en",
+            source="bandai_schedule_en",
+            pid="01_7158",
+        )
+        en.title = "HG 1/144 GELGOOG(GQ)"
+        en.normalized_title = "hg1/144gelgoog(gq)"
+        products, existing_rels = merge_product_sources([en])
+
+        rels = infer_manual_product_relationships([manual], products, existing_relationships=existing_rels)
+
+        assert len(rels) == 1
+        assert rels[0].relationship_key == "rel:manual-product:bandai:6001:bandai-product:01_7158"
+        assert rels[0].method == "official_en_title_match"
+        assert manual.related_products is not None
+        assert products[0].related_manuals is not None
+
 
 class TestValidateFinalDataset:
     def test_empty(self) -> None:
